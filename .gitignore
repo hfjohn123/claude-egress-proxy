@@ -1,0 +1,26 @@
+# Task-local planning artifacts
+.superpowers/
+
+# Local configuration, runtime state, and certificates
+config/
+state/
+certificates/
+*.pem
+*.key
+*.crt
+
+# Local logs and coverage
+logs/
+*.log
+coverage/
+*.coverprofile
+
+# Editor state
+.idea/
+.vscode/
+*.swp
+
+# Generated local compatibility results
+compatibility-results/
+compatibility-results-*/
+*.compatibility-result.json
