@@ -16,16 +16,24 @@ var (
 // PauseForTest pauses setup budget accounting until its returned resume function is called.
 func (d *Deadline) PauseForTest() (resume func() error, err error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.done {
+		d.mu.Unlock()
 		return nil, errDeadlineDone
 	}
 	if d.paused {
+		d.mu.Unlock()
 		return nil, errDeadlinePaused
+	}
+	if d.deadline.Sub(d.clock.Now()) <= 0 {
+		d.finishLocked()
+		d.mu.Unlock()
+		d.cancel()
+		return nil, errDeadlineDone
 	}
 	d.timer.Stop()
 	d.paused = true
 	d.pausedAt = d.clock.Now()
+	d.mu.Unlock()
 
 	var resumeMu sync.Mutex
 	used := false

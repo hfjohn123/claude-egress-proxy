@@ -57,3 +57,36 @@ func TestPausedSetupDeadlineStillCancelsFromParent(t *testing.T) {
 		t.Fatal("paused deadline did not respect parent cancellation")
 	}
 }
+
+func TestPausedSetupDeadlineRefusesExpiredBudget(t *testing.T) {
+	start := time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		budget  time.Duration
+		advance time.Duration
+	}{
+		{name: "zero budget", budget: 0},
+		{name: "negative budget", budget: -time.Second},
+		{name: "clock past deadline before timer notification", budget: time.Second, advance: 2 * time.Second},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clock := &testClock{now: start}
+			deadline := NewSetupDeadline(context.Background(), clock, test.budget)
+			clock.now = clock.now.Add(test.advance)
+
+			if _, err := deadline.PauseForTest(); err == nil {
+				t.Fatal("PauseForTest accepted an expired setup deadline")
+			}
+			if got := deadline.Remaining(); got != 0 {
+				t.Fatalf("remaining = %s, want 0", got)
+			}
+			select {
+			case <-deadline.Context().Done():
+			case <-time.After(time.Second):
+				t.Fatal("expired setup deadline context was not cancelled")
+			}
+		})
+	}
+}

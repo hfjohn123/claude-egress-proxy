@@ -50,15 +50,21 @@ func (d *Deadline) wait(parent context.Context) {
 
 func (d *Deadline) finish() {
 	d.mu.Lock()
+	shouldCancel := d.finishLocked()
+	d.mu.Unlock()
+	if shouldCancel {
+		d.cancel()
+	}
+}
+
+func (d *Deadline) finishLocked() bool {
 	if d.done {
-		d.mu.Unlock()
-		return
+		return false
 	}
 	d.done = true
 	d.paused = false
 	d.timer.Stop()
-	d.mu.Unlock()
-	d.cancel()
+	return true
 }
 
 // Context is cancelled when the parent is cancelled or the setup budget expires.
@@ -69,7 +75,11 @@ func (d *Deadline) Remaining() time.Duration {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.paused {
-		return d.deadline.Sub(d.pausedAt)
+		remaining := d.deadline.Sub(d.pausedAt)
+		if remaining < 0 {
+			return 0
+		}
+		return remaining
 	}
 	remaining := d.deadline.Sub(d.clock.Now())
 	if remaining < 0 {
