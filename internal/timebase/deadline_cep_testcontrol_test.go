@@ -90,3 +90,60 @@ func TestPausedSetupDeadlineRefusesExpiredBudget(t *testing.T) {
 		})
 	}
 }
+
+type scriptedClock struct {
+	now         []time.Time
+	index       int
+	timer       *testTimer
+	timerActive bool
+}
+
+func (c *scriptedClock) Now() time.Time {
+	value := c.now[c.index]
+	if c.index < len(c.now)-1 {
+		c.index++
+	}
+	return value
+}
+
+func (c *scriptedClock) NewTimer(time.Duration) Timer {
+	c.timer = &testTimer{channel: make(chan time.Time, 1), stopped: make(chan struct{}, 1), active: c.timerActive}
+	return c.timer
+}
+
+func (c *scriptedClock) NewTicker(time.Duration) Ticker { panic("ticker is not needed") }
+
+func TestPausedSetupDeadlineRejectsExpiryAtPauseBoundary(t *testing.T) {
+	start := time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)
+	deadlineAt := start.Add(time.Second)
+	clock := &scriptedClock{now: []time.Time{start, deadlineAt.Add(-time.Nanosecond), deadlineAt}, timerActive: true}
+	deadline := NewSetupDeadline(context.Background(), clock, time.Second)
+
+	if _, err := deadline.PauseForTest(); err == nil {
+		t.Fatal("PauseForTest accepted expiry at the pause boundary")
+	}
+	if got := deadline.Remaining(); got != 0 {
+		t.Fatalf("remaining = %s, want 0", got)
+	}
+	select {
+	case <-deadline.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("expired setup deadline context was not cancelled")
+	}
+}
+
+func TestPausedSetupDeadlineRejectsTimerStopFailure(t *testing.T) {
+	start := time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)
+	beforeDeadline := start.Add(time.Second - time.Nanosecond)
+	clock := &scriptedClock{now: []time.Time{start, beforeDeadline, beforeDeadline}}
+	deadline := NewSetupDeadline(context.Background(), clock, time.Second)
+
+	if _, err := deadline.PauseForTest(); err == nil {
+		t.Fatal("PauseForTest accepted an already-fired timer")
+	}
+	select {
+	case <-deadline.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("already-fired setup deadline context was not cancelled")
+	}
+}

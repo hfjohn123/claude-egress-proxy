@@ -30,9 +30,16 @@ func (d *Deadline) PauseForTest() (resume func() error, err error) {
 		d.cancel()
 		return nil, errDeadlineDone
 	}
-	d.timer.Stop()
+	stopped := d.timer.Stop()
+	pausedAt := d.clock.Now()
+	if !stopped || d.deadline.Sub(pausedAt) <= 0 {
+		d.finishLocked()
+		d.mu.Unlock()
+		d.cancel()
+		return nil, errDeadlineDone
+	}
 	d.paused = true
-	d.pausedAt = d.clock.Now()
+	d.pausedAt = pausedAt
 	d.mu.Unlock()
 
 	var resumeMu sync.Mutex
