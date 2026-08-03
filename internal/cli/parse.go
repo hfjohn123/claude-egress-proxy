@@ -85,10 +85,17 @@ func Parse(args []string, goos string) (Invocation, *UsageError) {
 }
 
 func malformedCommonUsage(args []string, goos string) *UsageError {
-	for index, arg := range args {
-		switch arg {
-		case "serve", "init", "credential", "admin-token", "pac", "check", "service":
-			invocation, err := parseCommand(args[index:], goos)
+	for len(args) > 0 {
+		switch {
+		case args[0] == "--config":
+			if len(args) < 2 {
+				return usage(UsageRoot)
+			}
+			args = args[2:]
+		case strings.HasPrefix(args[0], "--config="):
+			args = args[1:]
+		default:
+			invocation, err := parseCommand(args, goos)
 			if err != nil {
 				return err
 			}

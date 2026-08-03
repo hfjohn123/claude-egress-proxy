@@ -231,6 +231,28 @@ func TestParseMalformedCommonSelectorKeepsRecognizableCommandUsage(t *testing.T)
 	}
 }
 
+func TestParseMalformedCommonSelectorUsesOnlyTheCommandPosition(t *testing.T) {
+	tests := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"equals unknown before command word", []string{"--config=/tmp/config.yaml", "unknown", "serve"}, "usage: claude-egress-proxy [--config <absolute-file>] <command>\n"},
+		{"repeated selector unknown before command word", []string{"--config", absConfig, "--config", "/tmp/second.yaml", "unknown", "serve"}, "usage: claude-egress-proxy [--config <absolute-file>] <command>\n"},
+		{"mixed repeated equals unknown before command word", []string{"--config", absConfig, "--config=/tmp/second.yaml", "unknown", "serve"}, "usage: claude-egress-proxy [--config <absolute-file>] <command>\n"},
+		{"equals then repeated selector command position", []string{"--config=/tmp/config.yaml", "--config", "/tmp/second.yaml", "serve"}, "usage: claude-egress-proxy [--config <absolute-file>] serve\n"},
+		{"repeated then equals selector command position", []string{"--config", absConfig, "--config=/tmp/second.yaml", "serve"}, "usage: claude-egress-proxy [--config <absolute-file>] serve\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, usage := Parse(test.argv, "linux")
+			if usage == nil || string(usage.Bytes) != test.want {
+				t.Fatalf("Parse(%q) usage = %v, want %q", test.argv, usage, test.want)
+			}
+		})
+	}
+}
+
 func TestParseRejectsInvalidSelectorsBeforeTheyReachHandlers(t *testing.T) {
 	tests := []struct {
 		name string
