@@ -207,6 +207,30 @@ func TestParseUsesTheApplicableUsageForRecognizablePaths(t *testing.T) {
 	}
 }
 
+func TestParseMalformedCommonSelectorKeepsRecognizableCommandUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"equals serve", []string{"--config=/tmp/config.yaml", "serve"}, "usage: claude-egress-proxy [--config <absolute-file>] serve\n"},
+		{"repeated init", []string{"--config", absConfig, "--config", absConfig, "init"}, "usage: claude-egress-proxy [--config <absolute-file>] init [--state-root <absolute-directory>]\n"},
+		{"repeated credential", []string{"--config", absConfig, "--config", absConfig, "credential", "add", "--device", "laptop-1"}, "usage: claude-egress-proxy [--config <absolute-file>] credential add --device <device-identifier>\n"},
+		{"repeated admin", []string{"--config", absConfig, "--config", absConfig, "admin-token", "rotate"}, "usage: claude-egress-proxy [--config <absolute-file>] admin-token rotate\n"},
+		{"repeated pac", []string{"--config", absConfig, "--config", absConfig, "pac", "--output", absPAC}, "usage: claude-egress-proxy [--config <absolute-file>] pac --output <absolute-file>\n"},
+		{"repeated check", []string{"--config", absConfig, "--config", absConfig, "check", "config"}, "usage: claude-egress-proxy [--config <absolute-file>] check config\n"},
+		{"repeated service", []string{"--config", absConfig, "--config", absConfig, "service", "install"}, "usage: claude-egress-proxy [--config <absolute-file>] service <install|uninstall|start|stop>\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, usage := Parse(test.argv, "linux")
+			if usage == nil || string(usage.Bytes) != test.want {
+				t.Fatalf("Parse(%q) usage = %v, want %q", test.argv, usage, test.want)
+			}
+		})
+	}
+}
+
 func TestParseRejectsInvalidSelectorsBeforeTheyReachHandlers(t *testing.T) {
 	tests := []struct {
 		name string
@@ -250,6 +274,8 @@ func TestParseRejectsNonLexicalAbsolutePaths(t *testing.T) {
 		{"windows device path", "windows", []string{"--config", "\\\\.\\C:\\config.yaml", "serve"}},
 		{"windows empty unc server", "windows", []string{"--config", "\\\\\\share\\config.yaml", "serve"}},
 		{"windows empty unc share", "windows", []string{"--config", "\\\\server\\\\config.yaml", "serve"}},
+		{"windows empty later backslash component", "windows", []string{"--config", "\\\\server\\share\\\\config.yaml", "serve"}},
+		{"windows empty later slash component", "windows", []string{"--config", "//server/share//config.yaml", "serve"}},
 		{"unsupported platform", "darwin", []string{"serve"}},
 	}
 	for _, test := range tests {

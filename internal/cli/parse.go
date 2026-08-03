@@ -1,7 +1,10 @@
 // Package cli parses the closed command grammar without filesystem or network access.
 package cli
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
 
 type Command uint8
 
@@ -44,6 +47,9 @@ func Parse(args []string, goos string) (Invocation, *UsageError) {
 	validPlatform := goos == "linux" || goos == "windows"
 	configPath := ""
 	commonInvalid := !validPlatform
+	if len(args) > 0 && strings.HasPrefix(args[0], "--config=") {
+		return Invocation{}, malformedCommonUsage(args[1:], goos)
+	}
 	if len(args) > 0 && args[0] == "--config" {
 		if len(args) < 2 {
 			return Invocation{}, usage(UsageRoot)
@@ -53,6 +59,15 @@ func Parse(args []string, goos string) (Invocation, *UsageError) {
 			commonInvalid = true
 		}
 		args = args[2:]
+		if len(args) > 0 && args[0] == "--config" {
+			if len(args) < 2 {
+				return Invocation{}, usage(UsageRoot)
+			}
+			return Invocation{}, malformedCommonUsage(args[2:], goos)
+		}
+		if len(args) > 0 && strings.HasPrefix(args[0], "--config=") {
+			return Invocation{}, malformedCommonUsage(args[1:], goos)
+		}
 	}
 
 	invocation, err := parseCommand(args, goos)
@@ -67,6 +82,20 @@ func Parse(args []string, goos string) (Invocation, *UsageError) {
 	}
 	invocation.ConfigPath = configPath
 	return invocation, nil
+}
+
+func malformedCommonUsage(args []string, goos string) *UsageError {
+	for index, arg := range args {
+		switch arg {
+		case "serve", "init", "credential", "admin-token", "pac", "check", "service":
+			invocation, err := parseCommand(args[index:], goos)
+			if err != nil {
+				return err
+			}
+			return usageFor(invocation.Command)
+		}
+	}
+	return usage(UsageRoot)
 }
 
 func parseCommand(args []string, goos string) (Invocation, *UsageError) {
@@ -265,6 +294,11 @@ func uncPath(path string, separator byte) bool {
 	}
 	if serverEnd == start || serverEnd == len(path) {
 		return false
+	}
+	for index := serverEnd; index < len(path); index++ {
+		if path[index] == separator && (index == len(path)-1 || path[index+1] == separator) {
+			return false
+		}
 	}
 	shareStart := serverEnd + 1
 	shareEnd := shareStart
