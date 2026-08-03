@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestPublishFaultBoundariesAndReservedTemp(t *testing.T) {
@@ -41,6 +43,31 @@ func TestPublishFaultBoundariesAndReservedTemp(t *testing.T) {
 					if boundary != (CommitBoundary{NamespacePublished: wantPublished, TargetDurable: wantDurable}) {
 						t.Fatalf("boundary = %+v", boundary)
 					}
+					// Every interruption leaves only complete old/new target bytes and
+					// the one exact reserved remnant (never a partial target).
+					target, targetState, readErr := l.ReadFile("state", FilePolicy{Presence: Required, Kind: RegularFile, Access: policy.Access, MaxBytes: policy.MaxBytes})
+					if wantPublished {
+						if readErr != nil || string(target) != "new" || !targetState.Present {
+							t.Fatalf("published target = (%q,%+v,%v)", target, targetState, readErr)
+						}
+					} else if present {
+						if readErr != nil || string(target) != "old" {
+							t.Fatalf("old target = (%q,%v)", target, readErr)
+						}
+					} else if _, inspectErr := l.Inspect("state", FilePolicy{Presence: Optional, Kind: RegularFile, Access: policy.Access, MaxBytes: policy.MaxBytes}); inspectErr != nil {
+						t.Fatalf("absent target inspect = %v", inspectErr)
+					}
+					tempState, tempErr := l.Inspect("state.new", FilePolicy{Presence: Optional, Kind: RegularFile, Access: policy.Access, MaxBytes: policy.MaxBytes})
+					if tempErr != nil {
+						t.Fatal(tempErr)
+					}
+					wantTemp := point == BeforeTempWrite || point == AfterTempFlush
+					if tempState.Present != wantTemp {
+						t.Fatalf("temp present = %v, want %v", tempState.Present, wantTemp)
+					}
+					if tempState.Present && point == AfterTempFlush && tempState.Size != 3 {
+						t.Fatalf("flushed temp size = %d", tempState.Size)
+					}
 					return nil
 				})
 				if err != nil {
@@ -48,6 +75,87 @@ func TestPublishFaultBoundariesAndReservedTemp(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestConcurrentAbsentPublishersYieldOneCompleteWinner(t *testing.T) {
+	r := mutableTestRoot(t)
+	p := mutableFilePolicy(Optional, 32)
+	var wg sync.WaitGroup
+	results := make(chan error, 2)
+	for _, data := range [][]byte{[]byte("one"), []byte("two")} {
+		wg.Add(1)
+		go func(data []byte) {
+			defer wg.Done()
+			results <- r.WithExclusiveLock(context.Background(), "writers.lock", mutableFilePolicy(Optional, 32), func(l LockedFile) error {
+				_, err := l.Publish(context.Background(), "state", "state.new", data, p, AbsentTarget, NoFaults{})
+				return err
+			})
+		}(data)
+	}
+	wg.Wait()
+	close(results)
+	wins := 0
+	for err := range results {
+		if err == nil {
+			wins++
+		} else if !errors.Is(err, ErrAlreadyExists) {
+			t.Fatalf("publisher error = %v", err)
+		}
+	}
+	if wins != 1 {
+		t.Fatalf("winners = %d, want 1", wins)
+	}
+	data, _, err := r.ReadFile("state", FilePolicy{Presence: Required, Kind: RegularFile, Access: p.Access, MaxBytes: p.MaxBytes})
+	if err != nil || (string(data) != "one" && string(data) != "two") {
+		t.Fatalf("final bytes = %q, %v", data, err)
+	}
+}
+
+func TestMutableCloseWaitsForLockCallback(t *testing.T) {
+	r := mutableTestRoot(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	lockedDone := make(chan error, 1)
+	go func() {
+		lockedDone <- r.WithExclusiveLock(context.Background(), "close.lock", mutableFilePolicy(Optional, 8), func(LockedFile) error { close(entered); <-release; return nil })
+	}()
+	<-entered
+	closed := make(chan error, 1)
+	go func() { closed <- r.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned during callback: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	if err := <-lockedDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if err := r.WithExclusiveLock(context.Background(), "later.lock", mutableFilePolicy(Optional, 8), func(LockedFile) error { return nil }); !errors.Is(err, ErrClosed) {
+		t.Fatalf("post-close lock = %v", err)
+	}
+}
+
+func TestPublishRejectsNonReservedNamesAndOversizeData(t *testing.T) {
+	r := mutableTestRoot(t)
+	p := mutableFilePolicy(Optional, 2)
+	err := r.WithExclusiveLock(context.Background(), "policy.lock", mutableFilePolicy(Optional, 8), func(l LockedFile) error {
+		for _, pair := range [][2]string{{"a", "b.new"}, {"a", "a.tmp"}, {"a/b", "a/b.new"}} {
+			if _, err := l.Publish(context.Background(), pair[0], pair[1], []byte("x"), p, AbsentTarget, NoFaults{}); !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("names %q/%q = %v", pair[0], pair[1], err)
+			}
+		}
+		if _, err := l.Publish(context.Background(), "a", "a.new", []byte("too"), p, AbsentTarget, NoFaults{}); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("oversize = %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -3,6 +3,8 @@
 package securefs
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,6 +48,63 @@ func mutableTestRoot(t *testing.T) MutableRoot {
 	}
 	t.Cleanup(func() { _ = r.Close() })
 	return r
+}
+
+func TestReplaceRetryUsesExactFiveAttemptSchedule(t *testing.T) {
+	var attempts []int
+	faults := FaultsForTestWithReplace(nil, func(run func() error) error {
+		attempts = append(attempts, len(attempts))
+		return windows.ERROR_SHARING_VIOLATION
+	})
+	r := mutableTestRoot(t)
+	p := mutableFilePolicy(Optional, 32)
+	err := r.WithExclusiveLock(context.Background(), "retry.lock", mutableFilePolicy(Optional, 32), func(l LockedFile) error {
+		if _, err := l.Publish(context.Background(), "state", "state.new", []byte("old"), p, AbsentTarget, NoFaults{}); err != nil {
+			return err
+		}
+		boundary, err := l.Publish(context.Background(), "state", "state.new", []byte("new"), p, PresentTarget, faults)
+		if err == nil || boundary != (CommitBoundary{}) {
+			t.Fatalf("persistent sharing = (%+v, %v)", boundary, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 5 {
+		t.Fatalf("replace attempts = %d, want 5", len(attempts))
+	}
+	if !errors.Is(faults.hit(BeforeTempWrite), nil) {
+		t.Fatal("unexpected fault")
+	}
+}
+
+func TestAfterPublicationNeverRetriesReplace(t *testing.T) {
+	r := mutableTestRoot(t)
+	p := mutableFilePolicy(Optional, 32)
+	calls := 0
+	f := FaultsForTestWithReplace(func(point FaultPoint) error {
+		if point == AfterPublication {
+			return errors.New("stop")
+		}
+		return nil
+	}, func(run func() error) error { calls++; return run() })
+	err := r.WithExclusiveLock(context.Background(), "once.lock", mutableFilePolicy(Optional, 32), func(l LockedFile) error {
+		if _, err := l.Publish(context.Background(), "state", "state.new", []byte("old"), p, AbsentTarget, NoFaults{}); err != nil {
+			return err
+		}
+		b, err := l.Publish(context.Background(), "state", "state.new", []byte("new"), p, PresentTarget, f)
+		if err == nil || !b.NamespacePublished {
+			t.Fatalf("after publication = %+v,%v", b, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("replace calls=%d,want 1", calls)
+	}
 }
 
 // TestMutableRootPinsWindowsNamespace catches path-based publication escaping

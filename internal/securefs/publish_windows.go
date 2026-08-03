@@ -23,6 +23,8 @@ type windowsLockedFile struct {
 	gate       *lockedGate
 }
 
+type windowsReplaceFaults interface{ replaceAttempt(func() error) error }
+
 func platformWithExclusiveLock(ctx context.Context, op platformRoot, rootPolicy RootPolicy, name string, policy FilePolicy, fn func(LockedFile) error) error {
 	r, ok := op.(*windowsRoot)
 	if !ok {
@@ -377,7 +379,7 @@ func (l *windowsLockedFile) Publish(ctx context.Context, target, temp string, da
 	_ = windows.CloseHandle(h)
 	h = 0
 	if mode == PresentTarget {
-		err = l.winReplace(ctx, temp, target)
+		err = l.winReplace(ctx, temp, target, f)
 	} else {
 		err = l.winMove(temp, target)
 	}
@@ -443,7 +445,7 @@ func (l *windowsLockedFile) winMove(temp, target string) error {
 	return nil
 }
 
-func (l *windowsLockedFile) winReplace(ctx context.Context, temp, target string) error {
+func (l *windowsLockedFile) winReplace(ctx context.Context, temp, target string, faults Faults) error {
 	a, e := l.winPath(temp)
 	if e != nil {
 		return e
@@ -458,8 +460,20 @@ func (l *windowsLockedFile) winReplace(ctx context.Context, temp, target string)
 	defer deadline.Stop()
 	for attempt, delay := 0, 10*time.Millisecond; attempt < 5; attempt, delay = attempt+1, delay*2 {
 		replaceFile := windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
-		r, _, callErr := replaceFile.Call(uintptr(unsafe.Pointer(pb)), uintptr(unsafe.Pointer(pa)), 0, 0, 0, 0)
-		if r != 0 {
+		call := func() error {
+			r, _, callErr := replaceFile.Call(uintptr(unsafe.Pointer(pb)), uintptr(unsafe.Pointer(pa)), 0, 0, 0, 0)
+			if r != 0 {
+				return nil
+			}
+			return callErr
+		}
+		var callErr error
+		if injected, ok := faults.(windowsReplaceFaults); ok {
+			callErr = injected.replaceAttempt(call)
+		} else {
+			callErr = call()
+		}
+		if callErr == nil {
 			return nil
 		}
 		if callErr != windows.ERROR_SHARING_VIOLATION {
