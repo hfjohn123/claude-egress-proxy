@@ -142,8 +142,16 @@ func TestWindowsPostCreateFailureTargetsCreatedHandle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer parent.Close()
-	oldDuplicate, oldDelete := winDuplicateParent, winDeleteCreatedHandle
-	t.Cleanup(func() { winDuplicateParent, winDeleteCreatedHandle = oldDuplicate, oldDelete })
+	oldCreate, oldDuplicate, oldDelete := winCreateDirectory, winDuplicateParent, winDeleteCreatedHandle
+	t.Cleanup(func() {
+		winCreateDirectory, winDuplicateParent, winDeleteCreatedHandle = oldCreate, oldDuplicate, oldDelete
+	})
+	var created windows.Handle
+	winCreateDirectory = func(parent windows.Handle, name string, policy PermissionPolicy) (windows.Handle, error) {
+		handle, err := oldCreate(parent, name, policy)
+		created = handle
+		return handle, err
+	}
 	var deleted windows.Handle
 	winDuplicateParent = func(windows.Handle, windows.Handle, windows.Handle, *windows.Handle, uint32, bool, uint32) error {
 		return windows.ERROR_ACCESS_DENIED
@@ -152,7 +160,7 @@ func TestWindowsPostCreateFailureTargetsCreatedHandle(t *testing.T) {
 	if _, err := CreateRoot(parent, "post-create-failure", RootPolicy{Access: IdentityOnlyPermissions()}); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("CreateRoot error = %v, want ErrUnsafePath", err)
 	}
-	if deleted == 0 {
-		t.Fatal("post-create failure did not pass a nonzero created handle to deletion")
+	if created == 0 || deleted != created {
+		t.Fatalf("deletion handle = %v, created handle = %v; want exact created handle", deleted, created)
 	}
 }

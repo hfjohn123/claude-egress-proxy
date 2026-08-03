@@ -166,7 +166,7 @@ func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (pl
 	if !ok {
 		return nil, ErrUnsafePath
 	}
-	h, err := winCreateDirectoryAt(p.fd, name, policy.Access)
+	h, err := winCreateDirectory(p.fd, name, policy.Access)
 	if err != nil {
 		if existing, openErr := winOpenAt(p.fd, name, false); openErr == nil {
 			_ = windows.CloseHandle(existing)
@@ -488,6 +488,7 @@ func winRestrictedSecurityDescriptor(policy PermissionPolicy) (*windows.SECURITY
 }
 
 var (
+	winCreateDirectory     = winCreateDirectoryAt
 	winDuplicateParent     = windows.DuplicateHandle
 	winDeleteCreatedHandle = winDeleteCreatedNow
 )
