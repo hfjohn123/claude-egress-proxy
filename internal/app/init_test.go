@@ -130,6 +130,29 @@ func TestInitAcceptsUnrelatedExistingStateMember(t *testing.T) {
 	}
 }
 
+func TestInitRecoversWithQuarantinedFailedConfigMember(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "shared")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	quarantine := filepath.Join(root, ".securefs-cleanup-file-000102030405060708090a0b")
+	if err := os.WriteFile(quarantine, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	result := NewInitHandler(testInitDependencies(configPath, root, &countingEntropy{}))(context.Background(), cli.Invocation{Command: cli.Init})
+	if result.ExitCode != 0 {
+		t.Fatalf("init result = %+v", result)
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		t.Fatalf("config was not committed: %v", err)
+	}
+	if got, err := os.ReadFile(quarantine); err != nil || string(got) != "partial" {
+		t.Fatalf("quarantine = %q,%v", got, err)
+	}
+}
+
 func TestInitCreateFileFailureDiagnostics(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -146,6 +169,20 @@ func TestInitCreateFileFailureDiagnostics(t *testing.T) {
 				t.Fatalf("diagnostic = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestInitConfigAndStateDirectoryPlatformFailuresAreExactD010(t *testing.T) {
+	for _, directory := range []string{"config", "state"} {
+		t.Run(directory, func(t *testing.T) {
+			result := initDirectoryFailure(securefs.ErrUnsupportedInspection)
+			if result.ExitCode != 1 || string(result.Stderr) != string(contract.Fatal(contract.D010)) || len(result.Stdout) != 0 {
+				t.Fatalf("directory failure = %+v, want exact D010", result)
+			}
+		})
+	}
+	if result := initDirectoryFailure(securefs.ErrPermissions); string(result.Stderr) != string(contract.Fatal(contract.D004)) {
+		t.Fatalf("permission failure = %+v, want exact D004", result)
 	}
 }
 

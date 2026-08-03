@@ -70,7 +70,7 @@ func NewInitHandler(deps InitDependencies) Handler {
 		}
 		configRoot, err := ensureCreateRoot(configDir, policies.ConfigContainer, policies.ConfigDirectory, deps.Checkout)
 		if err != nil {
-			return initFailure(initPathCode(err))
+			return initDirectoryFailure(err)
 		}
 		defer configRoot.Close()
 		absent := policies.ConfigFile
@@ -88,7 +88,7 @@ func NewInitHandler(deps InitDependencies) Handler {
 		} else {
 			stateRoot, err = ensureCreateRoot(statePath, policies.StateContainer, policies.StateDirectory, deps.Checkout)
 			if err != nil {
-				return initFailure(initPathCode(err))
+				return initDirectoryFailure(err)
 			}
 			defer stateRoot.Close()
 			if stateRoot.Identity() == configRoot.Identity() && !securefs.PermissionsEqual(policies.ConfigDirectory.Access, policies.StateDirectory.Access) {
@@ -134,6 +134,10 @@ func initCreateFileCode(err error) contract.DiagnosticCode {
 		return contract.D004
 	}
 	return contract.D010
+}
+
+func initDirectoryFailure(err error) Result {
+	return initFailure(initPathCode(err))
 }
 
 var reservedRuntimeArtifacts = [...]string{

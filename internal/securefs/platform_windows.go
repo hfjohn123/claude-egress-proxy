@@ -246,6 +246,12 @@ func platformCreateRoot(parent platformRoot, name string, parentPolicy, policy R
 			_ = windows.CloseHandle(existing)
 			return nil, ErrAlreadyExists
 		}
+		if winDiskOrQuotaError(err) {
+			return nil, ErrUnsupportedInspection
+		}
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, windows.STATUS_ACCESS_DENIED) {
+			return nil, ErrPermissions
+		}
 		return nil, ErrUnsafePath
 	}
 	info, err := winInfo(h)
@@ -301,7 +307,7 @@ func platformCreateFileOnce(ctx context.Context, parent platformRoot, parentPoli
 		if errors.Is(err, windows.STATUS_OBJECT_NAME_COLLISION) || errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 			return CommitBoundary{}, ErrAlreadyExists
 		}
-		if errors.Is(err, windows.STATUS_DISK_FULL) || errors.Is(err, windows.STATUS_QUOTA_EXCEEDED) || errors.Is(err, windows.ERROR_DISK_FULL) || errors.Is(err, windows.ERROR_HANDLE_DISK_FULL) || errors.Is(err, windows.ERROR_DISK_QUOTA_EXCEEDED) {
+		if winDiskOrQuotaError(err) {
 			return CommitBoundary{}, ErrUnsupportedInspection
 		}
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, windows.STATUS_ACCESS_DENIED) {
@@ -338,6 +344,10 @@ func platformCreateFileOnce(ctx context.Context, parent platformRoot, parentPoli
 	}
 	durable = true
 	return CommitBoundary{NamespacePublished: true, TargetDurable: true}, nil
+}
+
+func winDiskOrQuotaError(err error) bool {
+	return errors.Is(err, windows.STATUS_DISK_FULL) || errors.Is(err, windows.STATUS_QUOTA_EXCEEDED) || errors.Is(err, windows.ERROR_DISK_FULL) || errors.Is(err, windows.ERROR_HANDLE_DISK_FULL) || errors.Is(err, windows.ERROR_DISK_QUOTA_EXCEEDED)
 }
 
 func (r *windowsRoot) identity() Identity { return r.id }

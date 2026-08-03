@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -43,7 +44,36 @@ func TestLinuxCreateRootAndFileApplyFinalOwnerAndMode(t *testing.T) {
 	}
 }
 
-func TestLinuxCreateFileOnceFailuresRemoveOnlyCreatedLeaf(t *testing.T) {
+func TestLinuxCreateRootMapsNamespaceIOFailuresToPlatformFailure(t *testing.T) {
+	for _, injected := range []error{unix.ENOSPC, unix.EDQUOT, unix.EIO, unix.EFBIG} {
+		t.Run(injected.Error(), func(t *testing.T) {
+			old := linuxCreateDirectory
+			t.Cleanup(func() { linuxCreateDirectory = old })
+			linuxCreateDirectory = func(int, string, uint32) error { return injected }
+			parent, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer parent.Close()
+			if _, err := CreateRoot(parent, "state", RootPolicy{Access: IdentityOnlyPermissions()}); !errors.Is(err, ErrUnsupportedInspection) || errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("CreateRoot error = %v, want platform failure without ErrUnsafePath", err)
+			}
+		})
+	}
+	old := linuxCreateDirectory
+	t.Cleanup(func() { linuxCreateDirectory = old })
+	linuxCreateDirectory = func(int, string, uint32) error { return unix.EACCES }
+	parent, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	if _, err := CreateRoot(parent, "state", RootPolicy{Access: IdentityOnlyPermissions()}); !errors.Is(err, ErrPermissions) {
+		t.Fatalf("CreateRoot access error = %v, want ErrPermissions", err)
+	}
+}
+
+func TestLinuxCreateFileOnceFailuresQuarantineCreatedLeafAwayFromRequestedName(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		configure func()
@@ -94,10 +124,56 @@ func TestLinuxCreateFileOnceFailuresRemoveOnlyCreatedLeaf(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(entries) != 0 {
-				t.Fatalf("cleanup artifacts = %v", entries)
+			if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), ".securefs-cleanup-file-") {
+				t.Fatalf("cleanup quarantine = %v", entries)
 			}
 		})
+	}
+}
+
+func TestLinuxCreateFileOnceCleanupNeverUnlinksSwapAfterFinalVerification(t *testing.T) {
+	oldWrite, oldAfterFinal := linuxCreateOnceWrite, linuxCreateOnceCleanupAfterFinalVerify
+	t.Cleanup(func() {
+		linuxCreateOnceWrite, linuxCreateOnceCleanupAfterFinalVerify = oldWrite, oldAfterFinal
+	})
+	linuxCreateOnceWrite = func(int, []byte) (int, error) { return 0, unix.ENOSPC }
+	base := t.TempDir()
+	var tomb string
+	linuxCreateOnceCleanupAfterFinalVerify = func(parentFD int, quarantine string) {
+		tomb = quarantine
+		if err := unix.Renameat(parentFD, quarantine, parentFD, "original"); err != nil {
+			t.Fatal(err)
+		}
+		fd, err := unix.Openat(parentFD, quarantine, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := unix.Write(fd, []byte("replacement")); err != nil {
+			t.Fatal(err)
+		}
+		_ = unix.Close(fd)
+	}
+	root, err := OpenCreateCapableRoot(base, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	policy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4}
+	if _, err := CreateFileOnce(context.Background(), root, "failed", []byte("four"), policy); !errors.Is(err, ErrUnsupportedInspection) {
+		t.Fatalf("CreateFileOnce error = %v", err)
+	}
+	if tomb == "" {
+		t.Fatal("final verification hook was not reached")
+	}
+	if _, err := os.Stat(filepath.Join(base, "failed")); !os.IsNotExist(err) {
+		t.Fatalf("requested leaf was restored: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(base, tomb))
+	if err != nil || string(got) != "replacement" {
+		t.Fatalf("replacement = %q,%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "original")); err != nil {
+		t.Fatalf("proved created identity lost: %v", err)
 	}
 }
 

@@ -114,6 +114,8 @@ func platformOpenCreateCapableRoot(path string, policy RootPolicy) (platformRoot
 	return platformOpenRoot(path, policy)
 }
 
+var linuxCreateDirectory = unix.Mkdirat
+
 func platformCreateRoot(parent platformRoot, name string, parentPolicy, policy RootPolicy) (platformRoot, error) {
 	p, ok := parent.(*linuxRoot)
 	if !ok {
@@ -126,9 +128,15 @@ func platformCreateRoot(parent platformRoot, name string, parentPolicy, policy R
 	if err := linuxCheck(parentStat, Directory, parentPolicy.Access); err != nil {
 		return nil, err
 	}
-	if err := unix.Mkdirat(p.fd, name, 0o700); err != nil {
+	if err := linuxCreateDirectory(p.fd, name, 0o700); err != nil {
 		if errors.Is(err, unix.EEXIST) {
 			return nil, ErrAlreadyExists
+		}
+		if errors.Is(err, unix.ENOSPC) || errors.Is(err, unix.EDQUOT) || errors.Is(err, unix.EIO) || errors.Is(err, unix.EFBIG) {
+			return nil, ErrUnsupportedInspection
+		}
+		if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EROFS) {
+			return nil, ErrPermissions
 		}
 		return nil, ErrUnsafePath
 	}
@@ -255,15 +263,18 @@ func platformCreateFileOnce(ctx context.Context, parent platformRoot, parentPoli
 }
 
 var (
-	linuxCreateOnceWrite              = unix.Write
-	linuxCreateOnceFinalStat          = linuxStat
-	linuxCreateOnceFsync              = unix.Fsync
-	linuxCreateOnceCleanupBeforeMove  func()
-	linuxCreateOnceCleanupAfterVerify func(parentFD int, tomb string)
-	linuxCreateOnceRename             = unix.Renameat2
-	linuxCreateOnceUnlink             = unix.Unlinkat
+	linuxCreateOnceWrite                   = unix.Write
+	linuxCreateOnceFinalStat               = linuxStat
+	linuxCreateOnceFsync                   = unix.Fsync
+	linuxCreateOnceCleanupBeforeMove       func()
+	linuxCreateOnceCleanupAfterVerify      func(parentFD int, tomb string)
+	linuxCreateOnceCleanupAfterFinalVerify func(parentFD int, tomb string)
+	linuxCreateOnceRename                  = unix.Renameat2
 )
 
+// cleanupCreatedLinuxFile atomically quarantines the requested member, proves
+// the moved identity, and restores any mismatch. It intentionally does not
+// unlink the quarantine because Linux has no handle-targeted unlink operation.
 func cleanupCreatedLinuxFile(parentFD int, name string, want Identity) {
 	if linuxCreateOnceCleanupBeforeMove != nil {
 		linuxCreateOnceCleanupBeforeMove()
@@ -291,7 +302,13 @@ func cleanupCreatedLinuxFile(parentFD int, name string, want Identity) {
 			restoreLinuxCleanupFile(parentFD, tomb, name)
 			return
 		}
-		_ = linuxCreateOnceUnlink(parentFD, tomb, 0)
+		if linuxCreateOnceCleanupAfterFinalVerify != nil {
+			linuxCreateOnceCleanupAfterFinalVerify(parentFD, tomb)
+		}
+		// Linux unlinkat removes a pathname, not a retained file identity.
+		// The rename already made the requested leaf recoverably absent; keep
+		// the proved created identity quarantined rather than risk deleting a
+		// replacement installed after the final verification.
 		return
 	}
 }

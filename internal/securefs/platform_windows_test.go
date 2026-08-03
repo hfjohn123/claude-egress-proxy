@@ -181,6 +181,39 @@ func TestWindowsCreateRootAppliesRestrictedDACLAtCreation(t *testing.T) {
 	}
 }
 
+func TestWindowsCreateRootMapsNamespaceIOFailuresToPlatformFailure(t *testing.T) {
+	for _, injected := range []error{windows.STATUS_DISK_FULL, windows.STATUS_QUOTA_EXCEEDED, windows.ERROR_DISK_FULL, windows.ERROR_HANDLE_DISK_FULL, windows.ERROR_DISK_QUOTA_EXCEEDED} {
+		t.Run(injected.Error(), func(t *testing.T) {
+			old := winCreateDirectory
+			t.Cleanup(func() { winCreateDirectory = old })
+			winCreateDirectory = func(windows.Handle, string, PermissionPolicy) (windows.Handle, error) {
+				return 0, injected
+			}
+			parent, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer parent.Close()
+			if _, err := CreateRoot(parent, "state", RootPolicy{Access: IdentityOnlyPermissions()}); !errors.Is(err, ErrUnsupportedInspection) || errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("CreateRoot error = %v, want platform failure without ErrUnsafePath", err)
+			}
+		})
+	}
+	old := winCreateDirectory
+	t.Cleanup(func() { winCreateDirectory = old })
+	winCreateDirectory = func(windows.Handle, string, PermissionPolicy) (windows.Handle, error) {
+		return 0, windows.ERROR_ACCESS_DENIED
+	}
+	parent, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	if _, err := CreateRoot(parent, "state", RootPolicy{Access: IdentityOnlyPermissions()}); !errors.Is(err, ErrPermissions) {
+		t.Fatalf("CreateRoot access error = %v, want ErrPermissions", err)
+	}
+}
+
 func TestWindowsADSLeafIsUnsafe(t *testing.T) {
 	root, err := OpenRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
 	if err != nil {

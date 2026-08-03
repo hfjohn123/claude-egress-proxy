@@ -23,7 +23,7 @@ func checkoutIdentityFromPaths(source, executable string) (securefs.Identity, er
 	if root, ok := sourceCheckoutRoot(source); ok {
 		anchors = append(anchors, root)
 	}
-	if cleanAbsolutePath(executable) {
+	if executable, ok := normalizeCleanAbsolutePath(executable); ok {
 		dir := filepath.Dir(executable)
 		if len(anchors) == 0 || !samePath(anchors[0], dir) {
 			anchors = append(anchors, dir)
@@ -42,7 +42,8 @@ func checkoutIdentityFromPaths(source, executable string) (securefs.Identity, er
 }
 
 func sourceCheckoutRoot(source string) (string, bool) {
-	if !cleanAbsolutePath(source) {
+	source, ok := normalizeCleanAbsolutePath(source)
+	if !ok {
 		return "", false
 	}
 	root := filepath.Dir(filepath.Dir(filepath.Dir(source)))
@@ -53,8 +54,17 @@ func sourceCheckoutRoot(source string) (string, bool) {
 	return root, true
 }
 
-func cleanAbsolutePath(path string) bool {
-	return path != "" && !strings.ContainsRune(path, '\x00') && filepath.IsAbs(path) && filepath.Clean(path) == path
+func normalizeCleanAbsolutePath(path string) (string, bool) {
+	if path == "" || strings.ContainsRune(path, '\x00') {
+		return "", false
+	}
+	if runtime.GOOS == "windows" {
+		path = filepath.FromSlash(path)
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return "", false
+	}
+	return path, true
 }
 
 func samePath(a, b string) bool {
