@@ -89,6 +89,7 @@ func TestWindowsACLValidatorRejectsUnsafeDescriptors(t *testing.T) {
 		t.Fatal(err)
 	}
 	allowAdmin := winACLRule{aceType: windows.ACCESS_ALLOWED_ACE_TYPE, sid: "S-1-5-32-544", mask: windows.FILE_LIST_DIRECTORY}
+	allowSystem := winACLRule{aceType: windows.ACCESS_ALLOWED_ACE_TYPE, sid: "S-1-5-18", mask: windows.FILE_LIST_DIRECTORY}
 	for _, test := range []struct {
 		name               string
 		protected, present bool
@@ -108,9 +109,24 @@ func TestWindowsACLValidatorRejectsUnsafeDescriptors(t *testing.T) {
 		})
 	}
 	for _, flag := range []uint8{windows.OBJECT_INHERIT_ACE, windows.CONTAINER_INHERIT_ACE, windows.NO_PROPAGATE_INHERIT_ACE, windows.INHERIT_ONLY_ACE, windows.INHERITED_ACE} {
-		if err := validateWindowsACL(policy, true, true, []winACLRule{{aceType: windows.ACCESS_ALLOWED_ACE_TYPE, aceFlags: flag, sid: "S-1-5-32-544", mask: windows.FILE_LIST_DIRECTORY}}); !errors.Is(err, ErrPermissions) {
+		rules := []winACLRule{allowAdmin, allowSystem}
+		rules[0].aceFlags = flag
+		if err := validateWindowsACL(policy, true, true, rules); !errors.Is(err, ErrPermissions) {
 			t.Fatalf("inheritance flag %#x error = %v, want ErrPermissions", flag, err)
 		}
+	}
+	unionPolicy, err := WindowsRestrictedPermissions([]string{"S-1-5-32-544", "S-1-5-18"}, windows.FILE_LIST_DIRECTORY|windows.FILE_WRITE_DATA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unionRules := []winACLRule{
+		{aceType: windows.ACCESS_ALLOWED_ACE_TYPE, sid: "S-1-5-32-544", mask: windows.FILE_LIST_DIRECTORY},
+		{aceType: windows.ACCESS_ALLOWED_ACE_TYPE, sid: "S-1-5-32-544", mask: windows.FILE_WRITE_DATA},
+		{aceType: windows.ACCESS_ALLOWED_ACE_TYPE, sid: "S-1-5-18", mask: windows.FILE_LIST_DIRECTORY},
+		{aceType: windows.ACCESS_ALLOWED_ACE_TYPE, sid: "S-1-5-18", mask: windows.FILE_WRITE_DATA},
+	}
+	if err := validateWindowsACL(unionPolicy, true, true, unionRules); err != nil {
+		t.Fatalf("per-SID multi-ACE union rejected: %v", err)
 	}
 }
 
@@ -128,15 +144,15 @@ func TestWindowsPostCreateFailureTargetsCreatedHandle(t *testing.T) {
 	defer parent.Close()
 	oldDuplicate, oldDelete := winDuplicateParent, winDeleteCreatedHandle
 	t.Cleanup(func() { winDuplicateParent, winDeleteCreatedHandle = oldDuplicate, oldDelete })
-	deleted := false
+	var deleted windows.Handle
 	winDuplicateParent = func(windows.Handle, windows.Handle, windows.Handle, *windows.Handle, uint32, bool, uint32) error {
 		return windows.ERROR_ACCESS_DENIED
 	}
-	winDeleteCreatedHandle = func(windows.Handle) { deleted = true }
+	winDeleteCreatedHandle = func(handle windows.Handle) { deleted = handle }
 	if _, err := CreateRoot(parent, "post-create-failure", RootPolicy{Access: IdentityOnlyPermissions()}); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("CreateRoot error = %v, want ErrUnsafePath", err)
 	}
-	if !deleted {
-		t.Fatal("post-create failure did not target created handle for deletion")
+	if deleted == 0 {
+		t.Fatal("post-create failure did not pass a nonzero created handle to deletion")
 	}
 }
