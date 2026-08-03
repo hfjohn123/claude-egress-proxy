@@ -1,6 +1,7 @@
 package securefs
 
 import (
+	"context"
 	"errors"
 	"math"
 	"os"
@@ -8,6 +9,51 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCreateFileOnceRequiresCapabilityAndNeverOverwrites(t *testing.T) {
+	parent, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	policy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4}
+	boundary, err := CreateFileOnce(context.Background(), parent, "config", []byte("four"), policy)
+	if err != nil || boundary != (CommitBoundary{NamespacePublished: true, TargetDurable: true}) {
+		t.Fatalf("CreateFileOnce = %+v,%v", boundary, err)
+	}
+	if _, err := CreateFileOnce(context.Background(), parent, "config", []byte("new"), policy); !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("overwrite error = %v", err)
+	}
+	if _, err := CreateFileOnce(context.Background(), parent, "other", []byte("large"), policy); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversize error = %v", err)
+	}
+}
+
+func TestCreateFileOnceTreatsZeroMaxAsZeroBytes(t *testing.T) {
+	parent, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	policy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 0}
+	if _, err := CreateFileOnce(context.Background(), parent, "nonempty", []byte("x"), policy); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("zero max nonempty error = %v", err)
+	}
+	if _, err := CreateFileOnce(context.Background(), parent, "empty", nil, policy); err != nil {
+		t.Fatalf("zero max empty = %v", err)
+	}
+}
+
+func TestOrdinaryRootCannotEscalateToCreateCapability(t *testing.T) {
+	root, err := OpenRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if _, ok := root.(CreateCapableRoot); ok {
+		t.Fatal("ordinary OpenRoot returned create capability")
+	}
+}
 
 // TestOpenRootRejectsNonCanonicalAndLinkedParents catches a path preflight that
 // accepts a relative, dot-cleanable, or linked root before opening it securely.
@@ -193,7 +239,7 @@ func TestValidateOutputExcludesCheckoutAndRetainsParent(t *testing.T) {
 // follows paths or creates intermediate directories instead of one leaf.
 func TestCreateRootCreatesExactlyOneRestrictedLeaf(t *testing.T) {
 	base := t.TempDir()
-	parent, err := OpenRoot(base, RootPolicy{Access: IdentityOnlyPermissions()})
+	parent, err := OpenCreateCapableRoot(base, RootPolicy{Access: IdentityOnlyPermissions()})
 	if err != nil {
 		t.Fatal(err)
 	}

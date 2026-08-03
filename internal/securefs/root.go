@@ -21,6 +21,16 @@ var (
 	ErrClosed                = errors.New("root closed")
 )
 
+type pathSecurityError struct{}
+
+func (pathSecurityError) Error() string { return ErrUnsafePath.Error() }
+func (pathSecurityError) Unwrap() error { return ErrUnsafePath }
+func pathSecurityFailure() error        { return pathSecurityError{} }
+func IsPathSecurityFailure(err error) bool {
+	var target pathSecurityError
+	return errors.As(err, &target)
+}
+
 type Presence uint8
 
 const (
@@ -63,12 +73,21 @@ type FileState struct {
 	ModTime  time.Time
 }
 
-type Root interface {
+type ReadRoot interface {
 	Identity() Identity
 	RecheckIdentity() error
 	Inspect(name string, policy FilePolicy) (FileState, error)
 	ReadFile(name string, policy FilePolicy) ([]byte, FileState, error)
+}
+
+type Root interface {
+	ReadRoot
 	Close() error
+}
+
+type CreateCapableRoot interface {
+	Root
+	createCapability()
 }
 
 // MutableRoot retains a validated directory with the rights necessary to
@@ -88,14 +107,18 @@ const (
 	permissionWindowsRestricted
 )
 
+type WindowsGrant struct {
+	SID    string
+	Access uint32
+}
+
 // PermissionPolicy has no open/zero value. It can only be obtained through a
 // constructor so callers cannot accidentally accept ambient filesystem ACLs.
 type PermissionPolicy struct {
-	kind permissionKind
-	uid  uint32
-	mode fs.FileMode
-	sids []string
-	mask uint32
+	kind   permissionKind
+	uid    uint32
+	mode   fs.FileMode
+	grants []WindowsGrant
 }
 
 func IdentityOnlyPermissions() PermissionPolicy {
@@ -112,6 +135,22 @@ func WindowsRestrictedPermissions(allowedSIDs []string, requiredAccess uint32) (
 	return newWindowsPolicy(allowedSIDs, requiredAccess)
 }
 
+func WindowsExactPermissions(grants []WindowsGrant) (PermissionPolicy, error) {
+	return newWindowsExactPolicy(grants)
+}
+
+func PermissionsEqual(a, b PermissionPolicy) bool {
+	if a.kind != b.kind || a.uid != b.uid || a.mode != b.mode || len(a.grants) != len(b.grants) {
+		return false
+	}
+	for i := range a.grants {
+		if a.grants[i] != b.grants[i] {
+			return false
+		}
+	}
+	return true
+}
+
 type platformRoot interface {
 	identity() Identity
 	recheck() error
@@ -125,6 +164,13 @@ type root struct {
 	closed bool
 	op     platformRoot
 }
+
+type createRoot struct {
+	*root
+	policy RootPolicy
+}
+
+func (*createRoot) createCapability() {}
 
 // mutableRoot uses operation leases instead of a root-wide RWMutex. Close
 // first closes admission, then waits for the complete lock callback (including
@@ -163,11 +209,23 @@ func OpenMutableRoot(path string, policy RootPolicy) (MutableRoot, error) {
 	return r, nil
 }
 
-func CreateRoot(parent Root, name string, policy RootPolicy) (Root, error) {
-	p, ok := parent.(*root)
+func OpenCreateCapableRoot(path string, policy RootPolicy) (CreateCapableRoot, error) {
+	if !validRootPolicy(policy) || !platformCleanAbsolute(path) {
+		return nil, ErrUnsafePath
+	}
+	op, err := platformOpenCreateCapableRoot(path, policy)
+	if err != nil {
+		return nil, err
+	}
+	return &createRoot{root: &root{op: op}, policy: policy}, nil
+}
+
+func CreateRoot(parent CreateCapableRoot, name string, policy RootPolicy) (CreateCapableRoot, error) {
+	cp, ok := parent.(*createRoot)
 	if !ok || !validRootPolicy(policy) || !validLeaf(name) {
 		return nil, ErrUnsafePath
 	}
+	p := cp.root
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.closed {
@@ -176,11 +234,34 @@ func CreateRoot(parent Root, name string, policy RootPolicy) (Root, error) {
 	if err := p.op.recheck(); err != nil {
 		return nil, err
 	}
-	op, err := platformCreateRoot(p.op, name, policy)
+	op, err := platformCreateRoot(p.op, name, cp.policy, policy)
 	if err != nil {
 		return nil, err
 	}
-	return &root{op: op}, nil
+	return &createRoot{root: &root{op: op}, policy: policy}, nil
+}
+
+func CreateFileOnce(ctx context.Context, parent CreateCapableRoot, name string, data []byte, policy FilePolicy) (CommitBoundary, error) {
+	cp, ok := parent.(*createRoot)
+	if !ok || ctx == nil || !validLeaf(name) || !validFilePolicy(policy) || policy.Presence != MustBeAbsent || policy.Kind != RegularFile {
+		return CommitBoundary{}, ErrUnsafePath
+	}
+	if int64(len(data)) > policy.MaxBytes {
+		return CommitBoundary{}, ErrTooLarge
+	}
+	if err := ctx.Err(); err != nil {
+		return CommitBoundary{}, err
+	}
+	r := cp.root
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.closed {
+		return CommitBoundary{}, ErrClosed
+	}
+	if err := r.op.recheck(); err != nil {
+		return CommitBoundary{}, err
+	}
+	return platformCreateFileOnce(ctx, r.op, cp.policy, name, data, policy)
 }
 
 func ValidateOutput(path string, checkout Identity, parentPolicy RootPolicy, outputPolicy FilePolicy) (parent Root, name string, state FileState, err error) {

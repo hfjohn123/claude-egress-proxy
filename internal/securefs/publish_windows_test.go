@@ -28,18 +28,18 @@ func mutableTestRoot(t *testing.T) MutableRoot {
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.FILE_LIST_DIRECTORY|0x0002|0x0004|0x0040)
+	policy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.FILE_GENERIC_READ|windows.FILE_TRAVERSE|windows.FILE_WRITE_ATTRIBUTES|0x0002|0x0004|0x0040)
 	if err != nil {
 		t.Fatal(err)
 	}
 	base := t.TempDir()
-	parent, err := OpenRoot(base, RootPolicy{Access: IdentityOnlyPermissions()})
+	parent, err := OpenCreateCapableRoot(base, RootPolicy{Access: IdentityOnlyPermissions()})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("OpenCreateCapableRoot: %v", err)
 	}
 	created, err := CreateRoot(parent, "restricted", RootPolicy{Access: policy})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("CreateRoot: %v", err)
 	}
 	if err := created.Close(); err != nil {
 		t.Fatal(err)
@@ -49,7 +49,7 @@ func mutableTestRoot(t *testing.T) MutableRoot {
 	}
 	r, err := OpenMutableRoot(filepath.Join(base, "restricted"), RootPolicy{Access: policy})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("OpenMutableRoot: %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
 	mutablePathForTest.Store(r, filepath.Join(base, "restricted"))
@@ -518,7 +518,7 @@ func TestMutableRootPinsWindowsNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootPolicy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.FILE_LIST_DIRECTORY|0x0002|0x0040)
+	rootPolicy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.FILE_GENERIC_READ|windows.FILE_TRAVERSE|windows.FILE_WRITE_ATTRIBUTES|0x0002|0x0004|0x0040)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,7 +527,7 @@ func TestMutableRootPinsWindowsNamespace(t *testing.T) {
 	if err := os.Mkdir(ancestor, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	parent, err := OpenRoot(ancestor, RootPolicy{Access: IdentityOnlyPermissions()})
+	parent, err := OpenCreateCapableRoot(ancestor, RootPolicy{Access: IdentityOnlyPermissions()})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,7 @@
 package securefs
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -48,7 +49,7 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 	}
 	if policy.ExcludedAncestor != (Identity{}) && linuxIdentity(rootStat) == policy.ExcludedAncestor {
 		_ = unix.Close(fd)
-		return nil, ErrUnsafePath
+		return nil, pathSecurityFailure()
 	}
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	if len(parts) == 1 && parts[0] == "" {
@@ -63,7 +64,7 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 		}
 		if policy.ExcludedAncestor != (Identity{}) && linuxIdentity(st) == policy.ExcludedAncestor {
 			_ = unix.Close(fd)
-			return nil, ErrUnsafePath
+			return nil, pathSecurityFailure()
 		}
 		parent, err := unix.Dup(fd)
 		if err != nil {
@@ -75,8 +76,9 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 	for i, part := range parts {
 		next, err := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
+			classified := linuxPathOpenError(fd, part, err)
 			_ = unix.Close(fd)
-			return nil, ErrUnsafePath
+			return nil, classified
 		}
 		st, err := linuxStat(next)
 		if err != nil || !linuxIsKind(st, Directory) {
@@ -88,7 +90,7 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 		if policy.ExcludedAncestor != (Identity{}) && id == policy.ExcludedAncestor {
 			_ = unix.Close(next)
 			_ = unix.Close(fd)
-			return nil, ErrUnsafePath
+			return nil, pathSecurityFailure()
 		}
 		if i == len(parts)-1 {
 			if err := linuxCheck(st, Directory, policy.Access); err != nil {
@@ -108,16 +110,23 @@ func platformOpenMutableRoot(path string, policy RootPolicy) (platformRoot, erro
 	return platformOpenRoot(path, policy)
 }
 
-func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (platformRoot, error) {
+func platformOpenCreateCapableRoot(path string, policy RootPolicy) (platformRoot, error) {
+	return platformOpenRoot(path, policy)
+}
+
+func platformCreateRoot(parent platformRoot, name string, parentPolicy, policy RootPolicy) (platformRoot, error) {
 	p, ok := parent.(*linuxRoot)
 	if !ok {
 		return nil, ErrUnsafePath
 	}
-	mode := uint32(0o700)
-	if policy.Access.kind == permissionLinuxExact {
-		mode = uint32(policy.Access.mode.Perm())
+	parentStat, err := linuxStat(p.fd)
+	if err != nil {
+		return nil, ErrUnsupportedInspection
 	}
-	if err := unix.Mkdirat(p.fd, name, mode); err != nil {
+	if err := linuxCheck(parentStat, Directory, parentPolicy.Access); err != nil {
+		return nil, err
+	}
+	if err := unix.Mkdirat(p.fd, name, 0o700); err != nil {
 		if errors.Is(err, unix.EEXIST) {
 			return nil, ErrAlreadyExists
 		}
@@ -127,22 +136,106 @@ func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (pl
 	if err != nil {
 		return nil, ErrUnsafePath
 	}
-	st, err := linuxStat(fd)
+	createdStat, createdStatErr := linuxStat(fd)
+	if createdStatErr != nil {
+		_ = unix.Close(fd)
+		return nil, ErrUnsupportedInspection
+	}
+	createdIdentity := linuxIdentity(createdStat)
+	if policy.Access.kind == permissionLinuxExact {
+		if err = unix.Fchown(fd, int(policy.Access.uid), -1); err != nil {
+			err = ErrPermissions
+		} else if err = unix.Fchmod(fd, uint32(policy.Access.mode.Perm())); err != nil {
+			err = ErrPermissions
+		}
+	}
+	st, statErr := linuxStat(fd)
+	if err == nil {
+		err = statErr
+	}
 	if err == nil {
 		err = linuxCheck(st, Directory, policy.Access)
 	}
 	if err != nil {
 		_ = unix.Close(fd)
-		cleanupCreatedLinux(p.fd, name, linuxIdentity(st))
+		cleanupCreatedLinux(p.fd, name, createdIdentity)
 		return nil, err
+	}
+	if err := unix.Fsync(fd); err != nil {
+		_ = unix.Close(fd)
+		cleanupCreatedLinux(p.fd, name, createdIdentity)
+		return nil, ErrUnsupportedInspection
+	}
+	if err := unix.Fsync(p.fd); err != nil {
+		_ = unix.Close(fd)
+		cleanupCreatedLinux(p.fd, name, createdIdentity)
+		return nil, ErrUnsupportedInspection
 	}
 	parentFD, err := unix.Dup(p.fd)
 	if err != nil {
 		_ = unix.Close(fd)
-		cleanupCreatedLinux(p.fd, name, linuxIdentity(st))
+		cleanupCreatedLinux(p.fd, name, createdIdentity)
 		return nil, ErrUnsafePath
 	}
 	return &linuxRoot{fd: fd, parentFD: parentFD, leaf: name, id: linuxIdentity(st)}, nil
+}
+
+func platformCreateFileOnce(ctx context.Context, parent platformRoot, parentPolicy RootPolicy, name string, data []byte, policy FilePolicy) (CommitBoundary, error) {
+	p, ok := parent.(*linuxRoot)
+	if !ok {
+		return CommitBoundary{}, ErrUnsafePath
+	}
+	parentStat, err := linuxStat(p.fd)
+	if err != nil {
+		return CommitBoundary{}, ErrUnsupportedInspection
+	}
+	if err := linuxCheck(parentStat, Directory, parentPolicy.Access); err != nil {
+		return CommitBoundary{}, err
+	}
+	createMode := uint32(0o600)
+	if policy.Access.kind == permissionLinuxExact {
+		createMode = uint32(policy.Access.mode.Perm())
+	}
+	fd, err := unix.Openat(p.fd, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, createMode)
+	if err != nil {
+		if errors.Is(err, unix.EEXIST) {
+			return CommitBoundary{}, ErrAlreadyExists
+		}
+		return CommitBoundary{}, ErrUnsafePath
+	}
+	defer unix.Close(fd)
+	if policy.Access.kind == permissionLinuxExact {
+		if err := unix.Fchown(fd, int(policy.Access.uid), -1); err != nil {
+			return CommitBoundary{}, ErrPermissions
+		}
+		if err := unix.Fchmod(fd, uint32(policy.Access.mode.Perm())); err != nil {
+			return CommitBoundary{}, ErrPermissions
+		}
+	}
+	for written := 0; written < len(data); {
+		if err := ctx.Err(); err != nil {
+			return CommitBoundary{NamespacePublished: true}, err
+		}
+		n, err := unix.Write(fd, data[written:])
+		if err != nil || n <= 0 {
+			return CommitBoundary{NamespacePublished: true}, ErrUnsafePath
+		}
+		written += n
+	}
+	st, err := linuxStat(fd)
+	if err != nil {
+		return CommitBoundary{NamespacePublished: true}, ErrUnsupportedInspection
+	}
+	if err := linuxCheck(st, RegularFile, policy.Access); err != nil {
+		return CommitBoundary{NamespacePublished: true}, err
+	}
+	if err := unix.Fsync(fd); err != nil {
+		return CommitBoundary{NamespacePublished: true}, ErrUnsupportedInspection
+	}
+	if err := unix.Fsync(p.fd); err != nil {
+		return CommitBoundary{NamespacePublished: true}, ErrUnsupportedInspection
+	}
+	return CommitBoundary{NamespacePublished: true, TargetDurable: true}, nil
 }
 
 // Narrow deterministic seams cover the two rename boundaries. Production
@@ -235,7 +328,7 @@ func (r *linuxRoot) inspect(name string, policy FilePolicy) (FileState, error) {
 				return FileState{}, ErrNotFound
 			}
 		}
-		return FileState{}, ErrUnsafePath
+		return FileState{}, linuxPathOpenError(r.fd, name, err)
 	}
 	defer unix.Close(fd)
 	st, err := linuxStat(fd)
@@ -260,7 +353,7 @@ func (r *linuxRoot) readFile(name string, policy FilePolicy) ([]byte, FileState,
 		if errors.Is(err, unix.ENOENT) {
 			return nil, FileState{}, ErrNotFound
 		}
-		return nil, FileState{}, ErrUnsafePath
+		return nil, FileState{}, linuxPathOpenError(r.fd, name, err)
 	}
 	defer unix.Close(fd)
 	st, err := linuxStat(fd)
@@ -301,6 +394,16 @@ func (r *linuxRoot) readFile(name string, policy FilePolicy) ([]byte, FileState,
 func (r *linuxRoot) close() error { _ = unix.Close(r.fd); _ = unix.Close(r.parentFD); return nil }
 
 func linuxStat(fd int) (unix.Stat_t, error) { var st unix.Stat_t; return st, unix.Fstat(fd, &st) }
+func linuxPathOpenError(parentFD int, name string, openErr error) error {
+	if errors.Is(openErr, unix.ELOOP) {
+		return pathSecurityFailure()
+	}
+	var st unix.Stat_t
+	if unix.Fstatat(parentFD, name, &st, unix.AT_SYMLINK_NOFOLLOW) == nil && st.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return pathSecurityFailure()
+	}
+	return ErrUnsafePath
+}
 func linuxIdentity(st unix.Stat_t) Identity {
 	var id Identity
 	id.platform = linuxIdentityTag
@@ -343,5 +446,8 @@ func linuxState(st unix.Stat_t, kind EntryKind) FileState {
 	return FileState{Present: true, Identity: linuxIdentity(st), Kind: kind, Size: st.Size, ModTime: time.Unix(st.Mtim.Sec, st.Mtim.Nsec)}
 }
 func newWindowsPolicy(_ []string, _ uint32) (PermissionPolicy, error) {
+	return PermissionPolicy{}, ErrUnsupportedInspection
+}
+func newWindowsExactPolicy(_ []WindowsGrant) (PermissionPolicy, error) {
 	return PermissionPolicy{}, ErrUnsupportedInspection
 }

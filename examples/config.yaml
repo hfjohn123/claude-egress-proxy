@@ -1,0 +1,27 @@
+format_version: 1
+instance_id: 000102030405060708090a0b0c0d0e0f
+state_root: "/var/lib/claude-egress-proxy"
+public_listener:
+  addresses: [0.0.0.0:443]
+  pac_enabled: false
+admin_listener:
+  enabled: false
+tls:
+  mode: acme
+  hostname: proxy.example.com
+resolver:
+  mode: system
+public_self_ipv4s: []
+per_device_capacity: 64
+absolute_tunnel_lifetime: disabled
+graceful_shutdown_drain: 20s
+destination:
+  profile: code
+  exact_hosts: []
+  suffixes: []
+  dangerous_custom_suffixes: false
+logging:
+  sink: default
+  sensitive_metadata: false
+metrics:
+  enabled: false

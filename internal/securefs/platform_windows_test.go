@@ -3,6 +3,7 @@
 package securefs
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"testing"
@@ -36,6 +37,75 @@ func TestWindowsACLPolicyRejectsUnsafeInputs(t *testing.T) {
 	}
 }
 
+func TestWindowsExactPermissionsRequireExactPerPrincipalMasks(t *testing.T) {
+	const fileAllAccess = uint32(windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff)
+	p, err := WindowsExactPermissions([]WindowsGrant{{SID: "S-1-5-32-544", Access: fileAllAccess}, {SID: "S-1-5-18", Access: windows.FILE_GENERIC_READ}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := []winACLRule{{aceType: windows.ACCESS_ALLOWED_ACE_TYPE, sid: "S-1-5-32-544", mask: fileAllAccess}, {aceType: windows.ACCESS_ALLOWED_ACE_TYPE, sid: "S-1-5-18", mask: windows.FILE_GENERIC_READ}}
+	if err := validateWindowsACL(p, true, true, good); err != nil {
+		t.Fatalf("exact ACL = %v", err)
+	}
+	good[1].mask |= windows.FILE_WRITE_DATA
+	if err := validateWindowsACL(p, true, true, good); !errors.Is(err, ErrPermissions) {
+		t.Fatalf("extra effective access = %v", err)
+	}
+	if _, err := WindowsExactPermissions([]WindowsGrant{{SID: "S-1-5-18", Access: 1}, {SID: "S-1-5-18", Access: 2}}); !errors.Is(err, ErrPermissions) {
+		t.Fatalf("duplicate SID = %v", err)
+	}
+}
+
+func TestWindowsCreateFileOnceAppliesExactDACL(t *testing.T) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fileAllAccess = uint32(windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff)
+	policy, err := WindowsExactPermissions([]WindowsGrant{{SID: user.User.Sid.String(), Access: fileAllAccess}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	filePolicy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: policy, MaxBytes: 4}
+	boundary, err := CreateFileOnce(context.Background(), root, "exact", []byte("four"), filePolicy)
+	if err != nil || boundary != (CommitBoundary{NamespacePublished: true, TargetDurable: true}) {
+		t.Fatalf("CreateFileOnce = %+v,%v", boundary, err)
+	}
+	if _, err := root.Inspect("exact", FilePolicy{Presence: Required, Kind: RegularFile, Access: policy, MaxBytes: 4}); err != nil {
+		t.Fatalf("exact ACL inspection = %v", err)
+	}
+}
+
+func TestWindowsCreateFileOnceRequiresFlushAndRemovesFailedIdentity(t *testing.T) {
+	old := winCreateOnceFlush
+	t.Cleanup(func() { winCreateOnceFlush = old })
+	winCreateOnceFlush = func(windows.Handle) error { return windows.ERROR_ACCESS_DENIED }
+	root, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	policy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4}
+	boundary, err := CreateFileOnce(context.Background(), root, "failed", []byte("four"), policy)
+	if !errors.Is(err, ErrUnsupportedInspection) || boundary != (CommitBoundary{NamespacePublished: true}) {
+		t.Fatalf("flush failure = %+v,%v", boundary, err)
+	}
+	state, err := root.Inspect("failed", FilePolicy{Presence: Optional, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4})
+	if err != nil || state.Present {
+		t.Fatalf("failed identity remained = %+v,%v", state, err)
+	}
+}
+
 // TestWindowsCreateRootAppliesRestrictedDACLAtCreation catches directory
 // creation that accepts a restricted policy but never installs its DACL.
 func TestWindowsCreateRootAppliesRestrictedDACLAtCreation(t *testing.T) {
@@ -48,11 +118,11 @@ func TestWindowsCreateRootAppliesRestrictedDACLAtCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.FILE_LIST_DIRECTORY)
+	policy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.FILE_GENERIC_READ|windows.FILE_TRAVERSE|windows.FILE_WRITE_DATA|windows.FILE_APPEND_DATA|windows.FILE_WRITE_ATTRIBUTES)
 	if err != nil {
 		t.Fatal(err)
 	}
-	parent, err := OpenRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	parent, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +207,7 @@ func TestWindowsReparseAttributeIsUnsafe(t *testing.T) {
 }
 
 func TestWindowsPostCreateFailureTargetsCreatedHandle(t *testing.T) {
-	parent, err := OpenRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	parent, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
 	if err != nil {
 		t.Fatal(err)
 	}

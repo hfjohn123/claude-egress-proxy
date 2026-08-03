@@ -3,6 +3,7 @@
 package securefs
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -15,11 +16,6 @@ import (
 )
 
 const windowsIdentityTag = 2
-
-// Retained roots must later be reopened for identity rechecks. These rights
-// are added to each allowed SID at creation, while policy.mask remains the
-// caller's required minimum for validation.
-const windowsRetainedRootAccess = windows.FILE_GENERIC_READ
 
 type windowsRoot struct {
 	fd                 windows.Handle
@@ -60,10 +56,22 @@ func newWindowsPolicy(allowedSIDs []string, requiredAccess uint32) (PermissionPo
 	if len(allowedSIDs) == 0 || requiredAccess == 0 {
 		return PermissionPolicy{}, ErrPermissions
 	}
-	seen := make(map[string]struct{}, len(allowedSIDs))
-	copySIDs := make([]string, 0, len(allowedSIDs))
-	for _, text := range allowedSIDs {
-		if text == "" {
+	grants := make([]WindowsGrant, len(allowedSIDs))
+	for i, sid := range allowedSIDs {
+		grants[i] = WindowsGrant{SID: sid, Access: requiredAccess}
+	}
+	return newWindowsExactPolicy(grants)
+}
+
+func newWindowsExactPolicy(grants []WindowsGrant) (PermissionPolicy, error) {
+	if len(grants) == 0 {
+		return PermissionPolicy{}, ErrPermissions
+	}
+	seen := make(map[string]struct{}, len(grants))
+	copyGrants := make([]WindowsGrant, 0, len(grants))
+	for _, grant := range grants {
+		text := grant.SID
+		if text == "" || grant.Access == 0 {
 			return PermissionPolicy{}, ErrPermissions
 		}
 		ptr, err := windows.UTF16PtrFromString(text)
@@ -79,15 +87,18 @@ func newWindowsPolicy(allowedSIDs []string, requiredAccess uint32) (PermissionPo
 			return PermissionPolicy{}, ErrPermissions
 		}
 		seen[canonical] = struct{}{}
-		copySIDs = append(copySIDs, canonical)
+		copyGrants = append(copyGrants, WindowsGrant{SID: canonical, Access: grant.Access})
 	}
-	return PermissionPolicy{kind: permissionWindowsRestricted, sids: copySIDs, mask: requiredAccess}, nil
+	return PermissionPolicy{kind: permissionWindowsRestricted, grants: copyGrants}, nil
 }
 
 func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 	return platformOpenRootWithPins(path, policy, false)
 }
 func platformOpenMutableRoot(path string, policy RootPolicy) (platformRoot, error) {
+	return platformOpenRootWithPins(path, policy, true)
+}
+func platformOpenCreateCapableRoot(path string, policy RootPolicy) (platformRoot, error) {
 	return platformOpenRootWithPins(path, policy, true)
 }
 func platformOpenRootWithPins(path string, policy RootPolicy, mutable bool) (platformRoot, error) {
@@ -109,7 +120,7 @@ func platformOpenRootWithPins(path string, policy RootPolicy, mutable bool) (pla
 	}
 	if policy.ExcludedAncestor != (Identity{}) && rootID == policy.ExcludedAncestor {
 		_ = windows.CloseHandle(fd)
-		return nil, ErrUnsafePath
+		return nil, pathSecurityFailure()
 	}
 	var pins []windows.Handle
 	pinsTransferred := false
@@ -151,21 +162,25 @@ func platformOpenRootWithPins(path string, policy RootPolicy, mutable bool) (pla
 		}
 		if policy.ExcludedAncestor != (Identity{}) && id == policy.ExcludedAncestor {
 			_ = windows.CloseHandle(fd)
-			return nil, ErrUnsafePath
+			return nil, pathSecurityFailure()
 		}
 		pinsTransferred = true
 		return &windowsRoot{fd: fd, volumeRoot: rootPath, path: rootPath, id: id, pins: pins}, nil
 	}
 	for i, part := range parts {
-		next, err := winOpenAt(fd, part, false)
+		createCapable := mutable && i == len(parts)-1
+		next, err := winOpenAtDirectory(fd, part, createCapable, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 		if err != nil {
 			_ = windows.CloseHandle(fd)
-			return nil, ErrUnsafePath
+			return nil, winPathOpenError(err)
 		}
 		info, err := winInfo(next)
 		if err != nil || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 			_ = windows.CloseHandle(next)
 			_ = windows.CloseHandle(fd)
+			if err == nil && info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+				return nil, pathSecurityFailure()
+			}
 			return nil, ErrUnsafePath
 		}
 		id, identityErr := winIdentity(next, info)
@@ -177,10 +192,10 @@ func platformOpenRootWithPins(path string, policy RootPolicy, mutable bool) (pla
 		if policy.ExcludedAncestor != (Identity{}) && id == policy.ExcludedAncestor {
 			_ = windows.CloseHandle(next)
 			_ = windows.CloseHandle(fd)
-			return nil, ErrUnsafePath
+			return nil, pathSecurityFailure()
 		}
 		if mutable {
-			pin, pinErr := winOpenAtPinned(fd, part)
+			pin, pinErr := winOpenAtDirectory(fd, part, createCapable, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
 			if pinErr != nil {
 				_ = windows.CloseHandle(next)
 				_ = windows.CloseHandle(fd)
@@ -213,14 +228,21 @@ func platformOpenRootWithPins(path string, policy RootPolicy, mutable bool) (pla
 	return nil, ErrUnsafePath
 }
 
-func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (platformRoot, error) {
+func platformCreateRoot(parent platformRoot, name string, parentPolicy, policy RootPolicy) (platformRoot, error) {
 	p, ok := parent.(*windowsRoot)
 	if !ok {
 		return nil, ErrUnsafePath
 	}
+	parentInfo, parentErr := winInfo(p.fd)
+	if parentErr != nil {
+		return nil, ErrUnsupportedInspection
+	}
+	if err := winCheck(p.fd, parentInfo, Directory, parentPolicy.Access); err != nil {
+		return nil, err
+	}
 	h, err := winCreateDirectory(p.fd, name, policy.Access)
 	if err != nil {
-		if existing, openErr := winOpenAt(p.fd, name, false); openErr == nil {
+		if existing, openErr := winOpenAtDirectory(p.fd, name, false, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE); openErr == nil {
 			_ = windows.CloseHandle(existing)
 			return nil, ErrAlreadyExists
 		}
@@ -247,7 +269,69 @@ func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (pl
 		_ = windows.CloseHandle(h)
 		return nil, ErrUnsafePath
 	}
-	return &windowsRoot{fd: h, parent: parentHandle, leaf: name, path: filepath.Join(p.path, name), id: id}, nil
+	pins := make([]windows.Handle, 0, len(p.pins))
+	for _, source := range p.pins {
+		var duplicate windows.Handle
+		if err := windows.DuplicateHandle(windows.CurrentProcess(), source, windows.CurrentProcess(), &duplicate, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+			closeWindowsPins(pins)
+			_ = windows.CloseHandle(parentHandle)
+			winDeleteCreated(h)
+			_ = windows.CloseHandle(h)
+			return nil, ErrUnsafePath
+		}
+		pins = append(pins, duplicate)
+	}
+	return &windowsRoot{fd: h, parent: parentHandle, leaf: name, path: filepath.Join(p.path, name), id: id, pins: pins}, nil
+}
+
+func platformCreateFileOnce(ctx context.Context, parent platformRoot, parentPolicy RootPolicy, name string, data []byte, policy FilePolicy) (CommitBoundary, error) {
+	p, ok := parent.(*windowsRoot)
+	if !ok {
+		return CommitBoundary{}, ErrUnsafePath
+	}
+	parentInfo, parentErr := winInfo(p.fd)
+	if parentErr != nil {
+		return CommitBoundary{}, ErrUnsupportedInspection
+	}
+	if err := winCheck(p.fd, parentInfo, Directory, parentPolicy.Access); err != nil {
+		return CommitBoundary{}, err
+	}
+	h, err := winCreateFileOnce(p.fd, name, policy.Access)
+	if err != nil {
+		if errors.Is(err, windows.STATUS_OBJECT_NAME_COLLISION) || errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			return CommitBoundary{}, ErrAlreadyExists
+		}
+		return CommitBoundary{}, ErrUnsafePath
+	}
+	defer windows.CloseHandle(h)
+	durable := false
+	defer func() {
+		if !durable {
+			_ = winMarkDelete(h)
+		}
+	}()
+	for written := 0; written < len(data); {
+		if err := ctx.Err(); err != nil {
+			return CommitBoundary{NamespacePublished: true}, err
+		}
+		var n uint32
+		if err := windows.WriteFile(h, data[written:], &n, nil); err != nil || n == 0 {
+			return CommitBoundary{NamespacePublished: true}, ErrUnsafePath
+		}
+		written += int(n)
+	}
+	info, err := winInfo(h)
+	if err != nil {
+		return CommitBoundary{NamespacePublished: true}, ErrUnsupportedInspection
+	}
+	if err := winCheck(h, info, RegularFile, policy.Access); err != nil {
+		return CommitBoundary{NamespacePublished: true}, err
+	}
+	if err := winCreateOnceFlush(h); err != nil {
+		return CommitBoundary{NamespacePublished: true}, ErrUnsupportedInspection
+	}
+	durable = true
+	return CommitBoundary{NamespacePublished: true, TargetDurable: true}, nil
 }
 
 func (r *windowsRoot) identity() Identity { return r.id }
@@ -266,7 +350,7 @@ func (r *windowsRoot) recheck() error {
 		}
 		return nil
 	}
-	h, err := winOpenAt(r.parent, r.leaf, false)
+	h, err := winOpenAtDirectory(r.parent, r.leaf, false, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 	if err != nil {
 		return ErrIdentityChanged
 	}
@@ -293,7 +377,7 @@ func (r *windowsRoot) inspect(name string, policy FilePolicy) (FileState, error)
 				return FileState{}, ErrNotFound
 			}
 		}
-		return FileState{}, ErrUnsafePath
+		return FileState{}, winPathOpenError(err)
 	}
 	defer windows.CloseHandle(h)
 	info, err := winInfo(h)
@@ -301,6 +385,9 @@ func (r *windowsRoot) inspect(name string, policy FilePolicy) (FileState, error)
 		info = r.inspectInfoForTest(name, info)
 	}
 	if err != nil || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		if err == nil && info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return FileState{}, pathSecurityFailure()
+		}
 		return FileState{}, ErrUnsafePath
 	}
 	if policy.Presence == MustBeAbsent {
@@ -321,7 +408,7 @@ func (r *windowsRoot) readFile(name string, policy FilePolicy) ([]byte, FileStat
 		if winNotFound(err) {
 			return nil, FileState{}, ErrNotFound
 		}
-		return nil, FileState{}, ErrUnsafePath
+		return nil, FileState{}, winPathOpenError(err)
 	}
 	defer windows.CloseHandle(h)
 	info, err := winInfo(h)
@@ -384,14 +471,14 @@ func winOpenAbsolute(path string) (windows.Handle, error) {
 	if err != nil {
 		return 0, err
 	}
-	return winOpen(nil, name, false)
+	return winOpenDirectory(nil, name, false, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 }
 func winOpenAbsolutePinned(path string) (windows.Handle, error) {
 	name, err := windows.NewNTUnicodeString(`\??\` + path)
 	if err != nil {
 		return 0, err
 	}
-	return winOpenWithShare(nil, name, false, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+	return winOpenDirectory(nil, name, false, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
 }
 func winOpenAt(parent windows.Handle, name string, create bool) (windows.Handle, error) {
 	n, err := windows.NewNTUnicodeString(name)
@@ -401,11 +488,29 @@ func winOpenAt(parent windows.Handle, name string, create bool) (windows.Handle,
 	return winOpen(&parent, n, create)
 }
 func winOpenAtPinned(parent windows.Handle, name string) (windows.Handle, error) {
+	return winOpenAtDirectory(parent, name, false, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+}
+
+func winOpenAtDirectory(parent windows.Handle, name string, createCapable bool, share uint32) (windows.Handle, error) {
 	n, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
 	}
-	return winOpenWithShare(&parent, n, false, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+	return winOpenDirectory(&parent, n, createCapable, share)
+}
+func winOpenDirectory(parent *windows.Handle, name *windows.NTUnicodeString, createCapable bool, share uint32) (windows.Handle, error) {
+	oa := windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), ObjectName: name, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE}
+	if parent != nil {
+		oa.RootDirectory = *parent
+	}
+	access := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_READ_ATTRIBUTES | windows.FILE_TRAVERSE | windows.READ_CONTROL | windows.SYNCHRONIZE)
+	if createCapable {
+		access |= windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.FILE_WRITE_ATTRIBUTES
+	}
+	var h windows.Handle
+	var io windows.IO_STATUS_BLOCK
+	err := windows.NtCreateFile(&h, access, &oa, &io, nil, 0, share, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	return h, err
 }
 func winOpen(parent *windows.Handle, name *windows.NTUnicodeString, create bool) (windows.Handle, error) {
 	return winOpenWithShare(parent, name, create, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
@@ -442,7 +547,25 @@ func winOpenAtCreate(parent windows.Handle, name string, policy PermissionPolicy
 	}
 	var h windows.Handle
 	var io windows.IO_STATUS_BLOCK
-	err = windows.NtCreateFile(&h, windows.FILE_GENERIC_READ|windows.FILE_READ_ATTRIBUTES|windows.DELETE, &oa, &io, nil, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_CREATE, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	err = windows.NtCreateFile(&h, windows.FILE_GENERIC_READ|windows.FILE_READ_ATTRIBUTES|windows.FILE_WRITE_DATA|windows.FILE_APPEND_DATA|windows.FILE_WRITE_ATTRIBUTES|windows.DELETE, &oa, &io, nil, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, windows.FILE_CREATE, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_WRITE_THROUGH, 0, 0)
+	return h, err
+}
+func winCreateFileOnce(parent windows.Handle, name string, policy PermissionPolicy) (windows.Handle, error) {
+	n, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return 0, err
+	}
+	oa := windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), RootDirectory: parent, ObjectName: n, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE}
+	if policy.kind == permissionWindowsRestricted {
+		sd, err := winRestrictedSecurityDescriptor(policy)
+		if err != nil {
+			return 0, err
+		}
+		oa.SecurityDescriptor = sd
+	}
+	var h windows.Handle
+	var io windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(&h, windows.FILE_WRITE_DATA|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.SYNCHRONIZE|windows.DELETE, &oa, &io, nil, windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ, windows.FILE_CREATE, windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_WRITE_THROUGH, 0, 0)
 	return h, err
 }
 func winInfo(h windows.Handle) (windows.ByHandleFileInformation, error) {
@@ -477,7 +600,10 @@ func winCheck(h windows.Handle, info windows.ByHandleFileInformation, kind Entry
 }
 
 func validateWindowsKind(info windows.ByHandleFileInformation, kind EntryKind) error {
-	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || (kind == Directory) != (info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return pathSecurityFailure()
+	}
+	if (kind == Directory) != (info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
 		return ErrUnsafePath
 	}
 	return nil
@@ -527,9 +653,9 @@ func validateWindowsACL(policy PermissionPolicy, protected, present bool, rules 
 	if !protected || !present {
 		return ErrPermissions
 	}
-	allowed := make(map[string]uint32, len(policy.sids))
-	for _, sid := range policy.sids {
-		allowed[sid] = 0
+	allowed := make(map[string]uint32, len(policy.grants))
+	for _, grant := range policy.grants {
+		allowed[grant.SID] = 0
 	}
 	for _, rule := range rules {
 		if rule.aceType != windows.ACCESS_ALLOWED_ACE_TYPE {
@@ -543,8 +669,8 @@ func validateWindowsACL(policy PermissionPolicy, protected, present bool, rules 
 		}
 		allowed[rule.sid] |= rule.mask
 	}
-	for _, mask := range allowed {
-		if mask&policy.mask != policy.mask {
+	for _, grant := range policy.grants {
+		if allowed[grant.SID] != grant.Access {
 			return ErrPermissions
 		}
 	}
@@ -552,8 +678,8 @@ func validateWindowsACL(policy PermissionPolicy, protected, present bool, rules 
 }
 func winRestrictedSecurityDescriptor(policy PermissionPolicy) (*windows.SECURITY_DESCRIPTOR, error) {
 	sddl := "D:P"
-	for _, sid := range policy.sids {
-		sddl += fmt.Sprintf("(A;;0x%X;;;%s)", policy.mask|windowsRetainedRootAccess, sid)
+	for _, grant := range policy.grants {
+		sddl += fmt.Sprintf("(A;;0x%X;;;%s)", grant.Access, grant.SID)
 	}
 	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil || sd == nil {
@@ -571,6 +697,7 @@ var (
 	winCreateDirectory     = winCreateDirectoryAt
 	winDuplicateParent     = windows.DuplicateHandle
 	winDeleteCreatedHandle = winDeleteCreatedNow
+	winCreateOnceFlush     = windows.FlushFileBuffers
 )
 
 func winDeleteCreated(h windows.Handle) { winDeleteCreatedHandle(h) }
@@ -591,4 +718,10 @@ func winState(h windows.Handle, info windows.ByHandleFileInformation, kind Entry
 }
 func winNotFound(err error) bool {
 	return errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) || errors.Is(err, windows.STATUS_OBJECT_PATH_NOT_FOUND)
+}
+func winPathOpenError(err error) error {
+	if errors.Is(err, windows.STATUS_REPARSE_POINT_ENCOUNTERED) || errors.Is(err, windows.STATUS_DIRECTORY_IS_A_REPARSE_POINT) || errors.Is(err, windows.ERROR_REPARSE_POINT_ENCOUNTERED) {
+		return pathSecurityFailure()
+	}
+	return ErrUnsafePath
 }

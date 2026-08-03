@@ -3,6 +3,7 @@
 package securefs
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -11,6 +12,36 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+func TestLinuxCreateRootAndFileApplyFinalOwnerAndMode(t *testing.T) {
+	base := t.TempDir()
+	parent, err := OpenCreateCapableRoot(base, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	uid := uint32(os.Getuid())
+	created, err := CreateRoot(parent, "state", RootPolicy{Access: LinuxExactPermissions(uid, fs.FileMode(0o700))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer created.Close()
+	var directory unix.Stat_t
+	if err := unix.Stat(filepath.Join(base, "state"), &directory); err != nil {
+		t.Fatal(err)
+	}
+	if directory.Uid != uid || fs.FileMode(directory.Mode).Perm() != 0o700 {
+		t.Fatalf("directory uid/mode = %d/%#o", directory.Uid, fs.FileMode(directory.Mode).Perm())
+	}
+	boundary, err := CreateFileOnce(context.Background(), created, "config", []byte("bytes"), FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: LinuxExactPermissions(uid, fs.FileMode(0o600)), MaxBytes: 5})
+	if err != nil || boundary != (CommitBoundary{NamespacePublished: true, TargetDurable: true}) {
+		t.Fatalf("CreateFileOnce = %+v,%v", boundary, err)
+	}
+	state, err := created.Inspect("config", FilePolicy{Presence: Required, Kind: RegularFile, Access: LinuxExactPermissions(uid, fs.FileMode(0o600)), MaxBytes: 5})
+	if err != nil || !state.Present {
+		t.Fatalf("created state = %+v,%v", state, err)
+	}
+}
 
 // TestLinuxCleanupDoesNotDeleteReplacement catches the check-then-unlink race
 // where a replacement is installed after identity validation.

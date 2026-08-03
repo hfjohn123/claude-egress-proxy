@@ -2,7 +2,7 @@
 .superpowers/
 
 # Local configuration, runtime state, and certificates
-config/
+/config/
 state/
 certificates/
 *.pem
