@@ -95,6 +95,9 @@ func NewInitHandler(deps InitDependencies) Handler {
 				return initFailure(contract.D004)
 			}
 		}
+		if err := rejectReservedRuntimeArtifacts(stateRoot); err != nil {
+			return initFailure(initPathCode(err))
+		}
 		if err := stateRoot.RecheckIdentity(); err != nil {
 			return initFailure(contract.D004)
 		}
@@ -117,16 +120,39 @@ func NewInitHandler(deps InitDependencies) Handler {
 			if errors.Is(err, securefs.ErrAlreadyExists) {
 				return initFailure(contract.D001)
 			}
-			if errors.Is(err, securefs.ErrPermissions) || errors.Is(err, securefs.ErrIdentityChanged) || errors.Is(err, securefs.ErrUnsafePath) {
-				return initFailure(contract.D004)
-			}
-			return initFailure(contract.D010)
+			return initFailure(initCreateFileCode(err))
 		}
 		if !boundary.NamespacePublished || !boundary.TargetDurable {
 			return initFailure(contract.D010)
 		}
 		return Result{ExitCode: 0}
 	}
+}
+
+func initCreateFileCode(err error) contract.DiagnosticCode {
+	if errors.Is(err, securefs.ErrPermissions) || errors.Is(err, securefs.ErrIdentityChanged) || errors.Is(err, securefs.ErrUnsafePath) {
+		return contract.D004
+	}
+	return contract.D010
+}
+
+var reservedRuntimeArtifacts = [...]string{
+	"credentials.json", "credentials.lock", "credentials.json.new",
+	"admin-token.json", "admin-token.lock", "admin-token.json.new",
+}
+
+func rejectReservedRuntimeArtifacts(root securefs.ReadRoot) error {
+	policy := securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, Access: securefs.IdentityOnlyPermissions()}
+	for _, name := range reservedRuntimeArtifacts {
+		state, err := root.Inspect(name, policy)
+		if err != nil {
+			return err
+		}
+		if state.Present {
+			return securefs.ErrAlreadyExists
+		}
+	}
+	return nil
 }
 
 func sameWindowsDirectorySelection(a, b string, aPolicy, bPolicy securefs.RootPolicy, checkout securefs.Identity) (bool, error) {

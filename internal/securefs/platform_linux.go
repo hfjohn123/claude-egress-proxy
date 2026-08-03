@@ -201,41 +201,121 @@ func platformCreateFileOnce(ctx context.Context, parent platformRoot, parentPoli
 		if errors.Is(err, unix.EEXIST) {
 			return CommitBoundary{}, ErrAlreadyExists
 		}
+		if errors.Is(err, unix.ENOSPC) || errors.Is(err, unix.EDQUOT) || errors.Is(err, unix.EIO) || errors.Is(err, unix.EFBIG) {
+			return CommitBoundary{}, ErrUnsupportedInspection
+		}
+		if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EROFS) {
+			return CommitBoundary{}, ErrPermissions
+		}
 		return CommitBoundary{}, ErrUnsafePath
 	}
 	defer unix.Close(fd)
+	createdStat, err := linuxStat(fd)
+	if err != nil {
+		// Without the created identity, cleanup cannot safely select a leaf.
+		return CommitBoundary{NamespacePublished: true}, ErrUnsupportedInspection
+	}
+	createdIdentity := linuxIdentity(createdStat)
+	fail := func(err error) (CommitBoundary, error) {
+		cleanupCreatedLinuxFile(p.fd, name, createdIdentity)
+		return CommitBoundary{NamespacePublished: true}, err
+	}
 	if policy.Access.kind == permissionLinuxExact {
 		if err := unix.Fchown(fd, int(policy.Access.uid), -1); err != nil {
-			return CommitBoundary{}, ErrPermissions
+			return fail(ErrPermissions)
 		}
 		if err := unix.Fchmod(fd, uint32(policy.Access.mode.Perm())); err != nil {
-			return CommitBoundary{}, ErrPermissions
+			return fail(ErrPermissions)
 		}
 	}
 	for written := 0; written < len(data); {
 		if err := ctx.Err(); err != nil {
-			return CommitBoundary{NamespacePublished: true}, err
+			return fail(err)
 		}
-		n, err := unix.Write(fd, data[written:])
+		n, err := linuxCreateOnceWrite(fd, data[written:])
 		if err != nil || n <= 0 {
-			return CommitBoundary{NamespacePublished: true}, ErrUnsafePath
+			return fail(ErrUnsupportedInspection)
 		}
 		written += n
 	}
-	st, err := linuxStat(fd)
+	st, err := linuxCreateOnceFinalStat(fd)
 	if err != nil {
-		return CommitBoundary{NamespacePublished: true}, ErrUnsupportedInspection
+		return fail(ErrUnsupportedInspection)
 	}
 	if err := linuxCheck(st, RegularFile, policy.Access); err != nil {
-		return CommitBoundary{NamespacePublished: true}, err
+		return fail(err)
 	}
-	if err := unix.Fsync(fd); err != nil {
-		return CommitBoundary{NamespacePublished: true}, ErrUnsupportedInspection
+	if err := linuxCreateOnceFsync(fd); err != nil {
+		return fail(ErrUnsupportedInspection)
 	}
-	if err := unix.Fsync(p.fd); err != nil {
-		return CommitBoundary{NamespacePublished: true}, ErrUnsupportedInspection
+	if err := linuxCreateOnceFsync(p.fd); err != nil {
+		return fail(ErrUnsupportedInspection)
 	}
 	return CommitBoundary{NamespacePublished: true, TargetDurable: true}, nil
+}
+
+var (
+	linuxCreateOnceWrite              = unix.Write
+	linuxCreateOnceFinalStat          = linuxStat
+	linuxCreateOnceFsync              = unix.Fsync
+	linuxCreateOnceCleanupBeforeMove  func()
+	linuxCreateOnceCleanupAfterVerify func(parentFD int, tomb string)
+	linuxCreateOnceRename             = unix.Renameat2
+	linuxCreateOnceUnlink             = unix.Unlinkat
+)
+
+func cleanupCreatedLinuxFile(parentFD int, name string, want Identity) {
+	if linuxCreateOnceCleanupBeforeMove != nil {
+		linuxCreateOnceCleanupBeforeMove()
+	}
+	for i := 0; i < 64; i++ {
+		tomb, err := linuxCleanupFileName()
+		if err != nil {
+			return
+		}
+		err = linuxCreateOnceRename(parentFD, name, parentFD, tomb, unix.RENAME_NOREPLACE)
+		if errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		if err != nil {
+			return
+		}
+		if !linuxRegularFileHasIdentity(parentFD, tomb, want) {
+			restoreLinuxCleanupFile(parentFD, tomb, name)
+			return
+		}
+		if linuxCreateOnceCleanupAfterVerify != nil {
+			linuxCreateOnceCleanupAfterVerify(parentFD, tomb)
+		}
+		if !linuxRegularFileHasIdentity(parentFD, tomb, want) {
+			restoreLinuxCleanupFile(parentFD, tomb, name)
+			return
+		}
+		_ = linuxCreateOnceUnlink(parentFD, tomb, 0)
+		return
+	}
+}
+
+func linuxRegularFileHasIdentity(parentFD int, name string, want Identity) bool {
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	st, statErr := linuxStat(fd)
+	_ = unix.Close(fd)
+	return statErr == nil && linuxIsKind(st, RegularFile) && linuxIdentity(st) == want
+}
+
+func restoreLinuxCleanupFile(parentFD int, tomb, name string) {
+	_ = linuxCreateOnceRename(parentFD, tomb, parentFD, name, unix.RENAME_NOREPLACE)
+}
+
+func linuxCleanupFileName() (string, error) {
+	var random [12]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return ".securefs-cleanup-file-" + hex.EncodeToString(random[:]), nil
 }
 
 // Narrow deterministic seams cover the two rename boundaries. Production

@@ -14,6 +14,8 @@ var programDataKnownFolder = func() (string, error) {
 	return windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
 }
 
+var lookupServiceSID = windows.LookupSID
+
 func PlatformDefaults() (DefaultPaths, error) {
 	base, err := programDataKnownFolder()
 	if err != nil || base == "" {
@@ -24,7 +26,7 @@ func PlatformDefaults() (DefaultPaths, error) {
 }
 
 func PlatformSecurityPolicies() (SecurityPolicies, error) {
-	service, _, _, err := windows.LookupSID("", "claude-egress-proxy")
+	service, _, _, err := lookupServiceSID("", `NT SERVICE\ClaudeEgressProxy`)
 	if err != nil || service == nil || !service.IsValid() {
 		return SecurityPolicies{}, ErrPlatform
 	}

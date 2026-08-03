@@ -301,6 +301,12 @@ func platformCreateFileOnce(ctx context.Context, parent platformRoot, parentPoli
 		if errors.Is(err, windows.STATUS_OBJECT_NAME_COLLISION) || errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 			return CommitBoundary{}, ErrAlreadyExists
 		}
+		if errors.Is(err, windows.STATUS_DISK_FULL) || errors.Is(err, windows.STATUS_QUOTA_EXCEEDED) || errors.Is(err, windows.ERROR_DISK_FULL) || errors.Is(err, windows.ERROR_HANDLE_DISK_FULL) || errors.Is(err, windows.ERROR_DISK_QUOTA_EXCEEDED) {
+			return CommitBoundary{}, ErrUnsupportedInspection
+		}
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, windows.STATUS_ACCESS_DENIED) {
+			return CommitBoundary{}, ErrPermissions
+		}
 		return CommitBoundary{}, ErrUnsafePath
 	}
 	defer windows.CloseHandle(h)
@@ -315,8 +321,8 @@ func platformCreateFileOnce(ctx context.Context, parent platformRoot, parentPoli
 			return CommitBoundary{NamespacePublished: true}, err
 		}
 		var n uint32
-		if err := windows.WriteFile(h, data[written:], &n, nil); err != nil || n == 0 {
-			return CommitBoundary{NamespacePublished: true}, ErrUnsafePath
+		if err := winCreateOnceWrite(h, data[written:], &n, nil); err != nil || n == 0 {
+			return CommitBoundary{NamespacePublished: true}, ErrUnsupportedInspection
 		}
 		written += int(n)
 	}
@@ -550,7 +556,7 @@ func winOpenAtCreate(parent windows.Handle, name string, policy PermissionPolicy
 	err = windows.NtCreateFile(&h, windows.FILE_GENERIC_READ|windows.FILE_READ_ATTRIBUTES|windows.FILE_WRITE_DATA|windows.FILE_APPEND_DATA|windows.FILE_WRITE_ATTRIBUTES|windows.DELETE, &oa, &io, nil, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, windows.FILE_CREATE, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_WRITE_THROUGH, 0, 0)
 	return h, err
 }
-func winCreateFileOnce(parent windows.Handle, name string, policy PermissionPolicy) (windows.Handle, error) {
+func winCreateFileOnceAt(parent windows.Handle, name string, policy PermissionPolicy) (windows.Handle, error) {
 	n, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
@@ -697,6 +703,8 @@ var (
 	winCreateDirectory     = winCreateDirectoryAt
 	winDuplicateParent     = windows.DuplicateHandle
 	winDeleteCreatedHandle = winDeleteCreatedNow
+	winCreateFileOnce      = winCreateFileOnceAt
+	winCreateOnceWrite     = windows.WriteFile
 	winCreateOnceFlush     = windows.FlushFileBuffers
 )
 

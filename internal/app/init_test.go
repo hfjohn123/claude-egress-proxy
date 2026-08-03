@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,8 +12,17 @@ import (
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/cli"
 	"github.com/hfjohn123/claude-egress-proxy/internal/config"
+	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
 	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
 )
+
+type countingEntropy struct{ reads int }
+
+func (r *countingEntropy) Read(p []byte) (int, error) {
+	r.reads++
+	clear(p)
+	return len(p), nil
+}
 
 func TestInitCreatesConfigLastAndNeverOverwrites(t *testing.T) {
 	base := t.TempDir()
@@ -70,6 +80,89 @@ func TestInitCreatesConfigLastAndNeverOverwrites(t *testing.T) {
 	}
 	if string(after) != string(bytesOnDisk) {
 		t.Fatal("init overwrote existing config")
+	}
+}
+
+func TestInitRejectsFrozenRuntimeArtifactsBeforeCommit(t *testing.T) {
+	reserved := []string{
+		"credentials.json", "credentials.lock", "credentials.json.new",
+		"admin-token.json", "admin-token.lock", "admin-token.json.new",
+	}
+	for _, name := range reserved {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			configPath := filepath.Join(base, "config", "config.yaml")
+			statePath := filepath.Join(base, "state")
+			if err := os.Mkdir(statePath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(statePath, name), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			entropy := &countingEntropy{}
+			result := NewInitHandler(testInitDependencies(configPath, statePath, entropy))(context.Background(), cli.Invocation{Command: cli.Init})
+			if result.ExitCode != 1 {
+				t.Fatalf("init result = %+v", result)
+			}
+			if entropy.reads != 0 {
+				t.Fatalf("entropy reads = %d, want zero", entropy.reads)
+			}
+			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+				t.Fatalf("config committed before artifact rejection: %v", err)
+			}
+		})
+	}
+}
+
+func TestInitAcceptsUnrelatedExistingStateMember(t *testing.T) {
+	base := t.TempDir()
+	configPath := filepath.Join(base, "config", "config.yaml")
+	statePath := filepath.Join(base, "state")
+	if err := os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(statePath, "operator-note.txt"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := NewInitHandler(testInitDependencies(configPath, statePath, &countingEntropy{}))(context.Background(), cli.Invocation{Command: cli.Init})
+	if result.ExitCode != 0 {
+		t.Fatalf("init result = %+v", result)
+	}
+}
+
+func TestInitCreateFileFailureDiagnostics(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want contract.DiagnosticCode
+	}{
+		{"unsafe path", securefs.ErrUnsafePath, contract.D004},
+		{"identity", securefs.ErrIdentityChanged, contract.D004},
+		{"permissions", securefs.ErrPermissions, contract.D004},
+		{"unsupported", securefs.ErrUnsupportedInspection, contract.D010},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := initCreateFileCode(test.err); got != test.want {
+				t.Fatalf("diagnostic = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func testInitDependencies(configPath, statePath string, entropy io.Reader) InitDependencies {
+	p := securefs.IdentityOnlyPermissions()
+	return InitDependencies{
+		Entropy: entropy,
+		Defaults: func() (config.DefaultPaths, error) {
+			return config.DefaultPaths{Config: configPath, StateRoot: statePath}, nil
+		},
+		Security: func() (config.SecurityPolicies, error) {
+			return config.SecurityPolicies{
+				ConfigContainer: securefs.RootPolicy{Access: p}, ConfigDirectory: securefs.RootPolicy{Access: p},
+				ConfigFile:     securefs.FilePolicy{Presence: securefs.MustBeAbsent, Kind: securefs.RegularFile, Access: p, MaxBytes: 1 << 20},
+				StateContainer: securefs.RootPolicy{Access: p}, StateDirectory: securefs.RootPolicy{Access: p},
+			}, nil
+		},
 	}
 }
 

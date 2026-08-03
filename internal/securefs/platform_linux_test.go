@@ -43,6 +43,129 @@ func TestLinuxCreateRootAndFileApplyFinalOwnerAndMode(t *testing.T) {
 	}
 }
 
+func TestLinuxCreateFileOnceFailuresRemoveOnlyCreatedLeaf(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func()
+		want      error
+	}{
+		{"write", func() {
+			linuxCreateOnceWrite = func(int, []byte) (int, error) { return 0, unix.ENOSPC }
+		}, ErrUnsupportedInspection},
+		{"validation", func() {
+			linuxCreateOnceFinalStat = func(int) (unix.Stat_t, error) { return unix.Stat_t{}, unix.EIO }
+		}, ErrUnsupportedInspection},
+		{"file fsync", func() {
+			linuxCreateOnceFsync = func(int) error { return unix.EIO }
+		}, ErrUnsupportedInspection},
+		{"parent fsync", func() {
+			calls := 0
+			linuxCreateOnceFsync = func(int) error {
+				calls++
+				if calls == 2 {
+					return unix.EIO
+				}
+				return nil
+			}
+		}, ErrUnsupportedInspection},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			oldWrite, oldStat, oldFsync := linuxCreateOnceWrite, linuxCreateOnceFinalStat, linuxCreateOnceFsync
+			t.Cleanup(func() {
+				linuxCreateOnceWrite, linuxCreateOnceFinalStat, linuxCreateOnceFsync = oldWrite, oldStat, oldFsync
+			})
+			test.configure()
+			base := t.TempDir()
+			root, err := OpenCreateCapableRoot(base, RootPolicy{Access: IdentityOnlyPermissions()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			policy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4}
+			boundary, err := CreateFileOnce(context.Background(), root, "failed", []byte("four"), policy)
+			if !errors.Is(err, test.want) || boundary != (CommitBoundary{NamespacePublished: true}) {
+				t.Fatalf("CreateFileOnce = %+v,%v, want %v", boundary, err, test.want)
+			}
+			state, err := root.Inspect("failed", FilePolicy{Presence: Optional, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4})
+			if err != nil || state.Present {
+				t.Fatalf("failed leaf remained = %+v,%v", state, err)
+			}
+			entries, err := os.ReadDir(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("cleanup artifacts = %v", entries)
+			}
+		})
+	}
+}
+
+func TestLinuxCreateFileOnceCleanupPreservesReplacementBeforeMove(t *testing.T) {
+	oldWrite, oldBefore := linuxCreateOnceWrite, linuxCreateOnceCleanupBeforeMove
+	t.Cleanup(func() {
+		linuxCreateOnceWrite, linuxCreateOnceCleanupBeforeMove = oldWrite, oldBefore
+	})
+	linuxCreateOnceWrite = func(int, []byte) (int, error) { return 0, unix.ENOSPC }
+	base := t.TempDir()
+	linuxCreateOnceCleanupBeforeMove = func() {
+		if err := os.Rename(filepath.Join(base, "failed"), filepath.Join(base, "original")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(base, "failed"), []byte("replacement"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := OpenCreateCapableRoot(base, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	policy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4}
+	if _, err := CreateFileOnce(context.Background(), root, "failed", []byte("four"), policy); !errors.Is(err, ErrUnsupportedInspection) {
+		t.Fatalf("CreateFileOnce error = %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(base, "failed"))
+	if err != nil || string(got) != "replacement" {
+		t.Fatalf("replacement = %q,%v", got, err)
+	}
+}
+
+func TestLinuxCreateFileOnceCleanupPreservesSwapAfterVerification(t *testing.T) {
+	oldWrite, oldAfter := linuxCreateOnceWrite, linuxCreateOnceCleanupAfterVerify
+	t.Cleanup(func() {
+		linuxCreateOnceWrite, linuxCreateOnceCleanupAfterVerify = oldWrite, oldAfter
+	})
+	linuxCreateOnceWrite = func(int, []byte) (int, error) { return 0, unix.ENOSPC }
+	base := t.TempDir()
+	linuxCreateOnceCleanupAfterVerify = func(parentFD int, tomb string) {
+		if err := unix.Renameat(parentFD, tomb, parentFD, "original"); err != nil {
+			t.Fatal(err)
+		}
+		fd, err := unix.Openat(parentFD, tomb, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := unix.Write(fd, []byte("replacement")); err != nil {
+			t.Fatal(err)
+		}
+		_ = unix.Close(fd)
+	}
+	root, err := OpenCreateCapableRoot(base, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	policy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4}
+	if _, err := CreateFileOnce(context.Background(), root, "failed", []byte("four"), policy); !errors.Is(err, ErrUnsupportedInspection) {
+		t.Fatalf("CreateFileOnce error = %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(base, "failed"))
+	if err != nil || string(got) != "replacement" {
+		t.Fatalf("replacement = %q,%v", got, err)
+	}
+}
+
 // TestLinuxCleanupDoesNotDeleteReplacement catches the check-then-unlink race
 // where a replacement is installed after identity validation.
 func TestLinuxCleanupDoesNotDeleteReplacement(t *testing.T) {

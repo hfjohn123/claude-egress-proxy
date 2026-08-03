@@ -106,6 +106,46 @@ func TestWindowsCreateFileOnceRequiresFlushAndRemovesFailedIdentity(t *testing.T
 	}
 }
 
+func TestWindowsCreateFileOnceMapsDiskFullWriteAndRemovesCreatedHandle(t *testing.T) {
+	old := winCreateOnceWrite
+	t.Cleanup(func() { winCreateOnceWrite = old })
+	winCreateOnceWrite = func(windows.Handle, []byte, *uint32, *windows.Overlapped) error {
+		return windows.ERROR_DISK_FULL
+	}
+	root, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	policy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4}
+	boundary, err := CreateFileOnce(context.Background(), root, "disk-full", []byte("four"), policy)
+	if !errors.Is(err, ErrUnsupportedInspection) || boundary != (CommitBoundary{NamespacePublished: true}) {
+		t.Fatalf("write failure = %+v,%v", boundary, err)
+	}
+	state, err := root.Inspect("disk-full", FilePolicy{Presence: Optional, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4})
+	if err != nil || state.Present {
+		t.Fatalf("failed identity remained = %+v,%v", state, err)
+	}
+}
+
+func TestWindowsCreateFileOnceMapsDiskFullCreateToIO(t *testing.T) {
+	old := winCreateFileOnce
+	t.Cleanup(func() { winCreateFileOnce = old })
+	winCreateFileOnce = func(windows.Handle, string, PermissionPolicy) (windows.Handle, error) {
+		return 0, windows.ERROR_DISK_FULL
+	}
+	root, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	policy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4}
+	boundary, err := CreateFileOnce(context.Background(), root, "disk-full-create", []byte("four"), policy)
+	if !errors.Is(err, ErrUnsupportedInspection) || boundary != (CommitBoundary{}) {
+		t.Fatalf("create failure = %+v,%v", boundary, err)
+	}
+}
+
 // TestWindowsCreateRootAppliesRestrictedDACLAtCreation catches directory
 // creation that accepts a restricted policy but never installs its DACL.
 func TestWindowsCreateRootAppliesRestrictedDACLAtCreation(t *testing.T) {

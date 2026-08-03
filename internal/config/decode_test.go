@@ -164,10 +164,12 @@ func TestDecodeAcceptsExactConfigByteLimit(t *testing.T) {
 }
 
 func TestDecodeRejectsIANAIPv4RangesThatAreNotGloballyReachable(t *testing.T) {
-	for _, address := range []string{"100.64.0.1", "192.0.2.1", "198.18.0.1", "203.0.113.1"} {
-		doc := append(validDocument(t), []byte("outbound_source_ipv4: "+address+"\n")...)
-		if _, err := config.Decode(doc); !errors.Is(err, config.ErrValue) {
-			t.Fatalf("%s error = %v", address, err)
+	for _, field := range []string{"outbound_source_ipv4: %s\n", "public_self_ipv4s: [%s]\n"} {
+		for _, address := range []string{"100.64.0.1", "192.0.2.1", "198.18.0.1", "203.0.113.1", "240.0.0.1", "255.255.255.254"} {
+			doc := append(validDocument(t), []byte(fmt.Sprintf(field, address))...)
+			if _, err := config.Decode(doc); !errors.Is(err, config.ErrValue) {
+				t.Fatalf("%q %s error = %v", field, address, err)
+			}
 		}
 	}
 }
