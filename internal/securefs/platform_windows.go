@@ -111,6 +111,12 @@ func platformOpenRootWithPins(path string, policy RootPolicy, mutable bool) (pla
 		return nil, ErrUnsafePath
 	}
 	var pins []windows.Handle
+	pinsTransferred := false
+	defer func() {
+		if !pinsTransferred {
+			closeWindowsPins(pins)
+		}
+	}()
 	if mutable {
 		pin, pinErr := winOpenAbsolutePinned(rootPath)
 		if pinErr != nil {
@@ -146,6 +152,7 @@ func platformOpenRootWithPins(path string, policy RootPolicy, mutable bool) (pla
 			_ = windows.CloseHandle(fd)
 			return nil, ErrUnsafePath
 		}
+		pinsTransferred = true
 		return &windowsRoot{fd: fd, volumeRoot: rootPath, path: rootPath, id: id, pins: pins}, nil
 	}
 	for i, part := range parts {
@@ -196,6 +203,7 @@ func platformOpenRootWithPins(path string, policy RootPolicy, mutable bool) (pla
 				_ = windows.CloseHandle(fd)
 				return nil, err
 			}
+			pinsTransferred = true
 			return &windowsRoot{fd: next, parent: fd, leaf: part, path: path, id: id, pins: pins}, nil
 		}
 		_ = windows.CloseHandle(fd)

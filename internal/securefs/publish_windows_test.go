@@ -92,6 +92,39 @@ func TestMutableRootPinsWindowsNamespace(t *testing.T) {
 		t.Fatal("ancestor rename succeeded while mutable root pinned")
 	}
 }
+
+// TestFailedMutableOpenReleasesTraversalPins catches an error path retaining a
+// no-delete-share pin after a later path component is rejected.
+func TestFailedMutableOpenReleasesTraversalPins(t *testing.T) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.FILE_LIST_DIRECTORY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "ancestor")
+	if err := os.Mkdir(ancestor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(ancestor, "not-a-directory")
+	if err := os.WriteFile(bad, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenMutableRoot(bad, RootPolicy{Access: policy}); err == nil {
+		t.Fatal("mutable open of regular file succeeded")
+	}
+	if err := os.Rename(ancestor, filepath.Join(base, "renamed")); err != nil {
+		t.Fatalf("failed mutable open leaked ancestor pin: %v", err)
+	}
+}
 func mutableFilePolicy(p Presence, max int64) FilePolicy {
 	token, err := windows.OpenCurrentProcessToken()
 	if err != nil {
