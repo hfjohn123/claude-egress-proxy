@@ -27,6 +27,23 @@ func TestOpenRootRejectsNonCanonicalAndLinkedParents(t *testing.T) {
 	}
 }
 
+// TestOpenRootExcludesFilesystemRoot catches a traversal that starts checking
+// only after the volume/filesystem root and therefore permits root-as-checkout.
+func TestOpenRootExcludesFilesystemRoot(t *testing.T) {
+	filesystemRoot := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
+	checkout, err := OpenRoot(filesystemRoot, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkoutID := checkout.Identity()
+	if err := checkout.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions(), ExcludedAncestor: checkoutID}); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("OpenRoot below filesystem-root checkout error = %v, want ErrUnsafePath", err)
+	}
+}
+
 // TestRootReadFileBoundedOnValidatedHandle catches a read that reopens by path
 // or accepts a file larger than the policy's sole maximum.
 func TestRootReadFileBoundedOnValidatedHandle(t *testing.T) {
@@ -50,6 +67,24 @@ func TestRootReadFileBoundedOnValidatedHandle(t *testing.T) {
 	}
 	if string(got) != "four" || !state.Present || state.Size != 4 || state.Identity == (Identity{}) {
 		t.Fatalf("ReadFile = (%q, %+v), want validated file metadata", got, state)
+	}
+}
+
+// TestBoundedReadChunkNeverExceedsOverflowProbe catches a read loop that asks
+// the OS for an ambient buffer (for example 32 KiB) after a MaxBytes policy.
+func TestBoundedReadChunkNeverExceedsOverflowProbe(t *testing.T) {
+	for _, test := range []struct {
+		max, used int64
+		want      int
+	}{
+		{max: 3, used: 0, want: 4},
+		{max: 3, used: 3, want: 1},
+		{max: 3, used: 4, want: 0},
+		{max: 0, used: 0, want: 32 * 1024},
+	} {
+		if got := boundedReadChunk(test.max, test.used, 32*1024); got != test.want {
+			t.Fatalf("boundedReadChunk(%d, %d) = %d, want %d", test.max, test.used, got, test.want)
+		}
 	}
 }
 

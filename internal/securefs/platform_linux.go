@@ -3,7 +3,9 @@
 package securefs
 
 import (
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io/fs"
 	"path/filepath"
@@ -37,6 +39,15 @@ func platformSplitOutput(path string) (string, string, error) {
 func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
+		return nil, ErrUnsafePath
+	}
+	rootStat, err := linuxStat(fd)
+	if err != nil {
+		_ = unix.Close(fd)
+		return nil, ErrUnsafePath
+	}
+	if policy.ExcludedAncestor != (Identity{}) && linuxIdentity(rootStat) == policy.ExcludedAncestor {
+		_ = unix.Close(fd)
 		return nil, ErrUnsafePath
 	}
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
@@ -130,16 +141,57 @@ func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (pl
 	return &linuxRoot{fd: fd, parentFD: parentFD, leaf: name, id: linuxIdentity(st)}, nil
 }
 
+// linuxCleanupBeforeExchange is a narrow deterministic seam for the rename
+// boundary test. Production leaves it nil.
+var linuxCleanupBeforeExchange func()
+
 func cleanupCreatedLinux(parentFD int, name string, want Identity) {
-	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	tomb, err := linuxCleanupTombstone(parentFD)
 	if err != nil {
 		return
 	}
-	defer unix.Close(fd)
-	st, err := linuxStat(fd)
-	if err == nil && linuxIdentity(st) == want {
-		_ = unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
+	if linuxCleanupBeforeExchange != nil {
+		linuxCleanupBeforeExchange()
 	}
+	if err := unix.Renameat2(parentFD, name, parentFD, tomb, unix.RENAME_EXCHANGE); err != nil {
+		_ = unix.Unlinkat(parentFD, tomb, unix.AT_REMOVEDIR)
+		return
+	}
+	fd, err := unix.Openat(parentFD, tomb, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return
+	}
+	st, statErr := linuxStat(fd)
+	_ = unix.Close(fd)
+	if statErr != nil || linuxIdentity(st) != want {
+		// Do not delete the entry now occupying tomb: it is an unverified
+		// replacement. Exchange it back and tolerate a leftover tombstone.
+		_ = unix.Renameat2(parentFD, name, parentFD, tomb, unix.RENAME_EXCHANGE)
+		return
+	}
+	// The final pathname identifies the verified just-created identity. A
+	// parent that satisfies the caller's restricted policy cannot be modified
+	// by an untrusted principal between this exchange and rmdir.
+	_ = unix.Unlinkat(parentFD, tomb, unix.AT_REMOVEDIR)
+}
+
+func linuxCleanupTombstone(parentFD int) (string, error) {
+	var random [8]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	name := ".securefs-cleanup-" + hex.EncodeToString(random[:])
+	for i := 0; i < 64; i++ {
+		candidate := name + string(rune('a'+i%26))
+		err := unix.Mkdirat(parentFD, candidate, 0o700)
+		if err == nil {
+			return candidate, nil
+		}
+		if !errors.Is(err, unix.EEXIST) {
+			return "", err
+		}
+	}
+	return "", unix.EEXIST
 }
 
 func (r *linuxRoot) identity() Identity { return r.id }
@@ -210,17 +262,14 @@ func (r *linuxRoot) readFile(name string, policy FilePolicy) ([]byte, FileState,
 	if policy.MaxBytes > 0 && state.Size > policy.MaxBytes {
 		return nil, FileState{}, ErrTooLarge
 	}
-	limit := state.Size
-	if policy.MaxBytes > 0 {
-		limit = policy.MaxBytes + 1
-	}
-	if limit < 0 || limit > int64(^uint(0)>>1) {
-		return nil, FileState{}, ErrTooLarge
-	}
-	buf := make([]byte, 0, limit)
+	buf := make([]byte, 0)
 	tmp := make([]byte, 32*1024)
 	for {
-		n, readErr := unix.Read(fd, tmp)
+		chunk := boundedReadChunk(policy.MaxBytes, int64(len(buf)), len(tmp))
+		if chunk == 0 {
+			return nil, FileState{}, ErrTooLarge
+		}
+		n, readErr := unix.Read(fd, tmp[:chunk])
 		if n > 0 {
 			if policy.MaxBytes > 0 && int64(len(buf)+n) > policy.MaxBytes {
 				return nil, FileState{}, ErrTooLarge

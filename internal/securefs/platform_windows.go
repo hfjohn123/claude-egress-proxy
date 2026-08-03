@@ -17,10 +17,11 @@ import (
 const windowsIdentityTag = 2
 
 type windowsRoot struct {
-	fd     windows.Handle
-	parent windows.Handle
-	leaf   string
-	id     Identity
+	fd         windows.Handle
+	parent     windows.Handle
+	leaf       string
+	volumeRoot string
+	id         Identity
 }
 
 type windowsFileIDInfo struct {
@@ -45,10 +46,6 @@ func platformSplitOutput(path string) (string, string, error) {
 		return "", "", ErrUnsafePath
 	}
 	return parent, name, nil
-}
-
-func WindowsRestrictedPermissions(allowedSIDs []string, requiredAccess uint32) (PermissionPolicy, error) {
-	return newWindowsPolicy(allowedSIDs, requiredAccess)
 }
 
 func newWindowsPolicy(allowedSIDs []string, requiredAccess uint32) (PermissionPolicy, error) {
@@ -86,6 +83,20 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 	if err != nil {
 		return nil, ErrUnsafePath
 	}
+	rootInfo, err := winInfo(fd)
+	if err != nil {
+		_ = windows.CloseHandle(fd)
+		return nil, ErrUnsafePath
+	}
+	rootID, err := winIdentity(fd, rootInfo)
+	if err != nil {
+		_ = windows.CloseHandle(fd)
+		return nil, ErrUnsupportedInspection
+	}
+	if policy.ExcludedAncestor != (Identity{}) && rootID == policy.ExcludedAncestor {
+		_ = windows.CloseHandle(fd)
+		return nil, ErrUnsafePath
+	}
 	parts := strings.FieldsFunc(strings.TrimPrefix(path[len(volume):], `\`), func(r rune) bool { return r == '\\' || r == '/' })
 	if len(parts) == 0 {
 		info, err := winInfo(fd)
@@ -106,7 +117,7 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 			_ = windows.CloseHandle(fd)
 			return nil, ErrUnsafePath
 		}
-		return &windowsRoot{fd: fd, id: id}, nil
+		return &windowsRoot{fd: fd, volumeRoot: rootPath, id: id}, nil
 	}
 	for i, part := range parts {
 		next, err := winOpenAt(fd, part, false)
@@ -150,7 +161,7 @@ func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (pl
 	if !ok {
 		return nil, ErrUnsafePath
 	}
-	h, err := winCreateDirectoryAt(p.fd, name)
+	h, err := winCreateDirectoryAt(p.fd, name, policy.Access)
 	if err != nil {
 		if existing, openErr := winOpenAt(p.fd, name, false); openErr == nil {
 			_ = windows.CloseHandle(existing)
@@ -159,9 +170,6 @@ func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (pl
 		return nil, ErrUnsafePath
 	}
 	info, err := winInfo(h)
-	if err == nil && policy.Access.kind == permissionWindowsRestricted {
-		err = winSetRestrictedDACL(h, policy.Access)
-	}
 	if err == nil {
 		err = winCheck(h, info, Directory, policy.Access)
 	}
@@ -172,11 +180,13 @@ func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (pl
 	}
 	id, err := winIdentity(h, info)
 	if err != nil {
+		winDeleteCreated(h)
 		_ = windows.CloseHandle(h)
 		return nil, ErrUnsupportedInspection
 	}
 	var parentHandle windows.Handle
 	if err := windows.DuplicateHandle(windows.CurrentProcess(), p.fd, windows.CurrentProcess(), &parentHandle, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		winDeleteCreated(h)
 		_ = windows.CloseHandle(h)
 		return nil, ErrUnsafePath
 	}
@@ -186,9 +196,14 @@ func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (pl
 func (r *windowsRoot) identity() Identity { return r.id }
 
 func (r *windowsRoot) recheck() error {
-	if r.parent == 0 {
-		info, err := winInfo(r.fd)
-		id, identityErr := winIdentity(r.fd, info)
+	if r.volumeRoot != "" {
+		h, err := winOpenAbsolute(r.volumeRoot)
+		if err != nil {
+			return ErrIdentityChanged
+		}
+		defer windows.CloseHandle(h)
+		info, err := winInfo(h)
+		id, identityErr := winIdentity(h, info)
 		if err != nil || identityErr != nil || id != r.id {
 			return ErrIdentityChanged
 		}
@@ -263,11 +278,15 @@ func (r *windowsRoot) readFile(name string, policy FilePolicy) ([]byte, FileStat
 	if policy.MaxBytes > 0 && state.Size > policy.MaxBytes {
 		return nil, FileState{}, ErrTooLarge
 	}
-	buf := make([]byte, 0, state.Size)
+	buf := make([]byte, 0)
 	tmp := make([]byte, 32*1024)
 	for {
+		chunk := boundedReadChunk(policy.MaxBytes, int64(len(buf)), len(tmp))
+		if chunk == 0 {
+			return nil, FileState{}, ErrTooLarge
+		}
 		var n uint32
-		err := windows.ReadFile(h, tmp, &n, nil)
+		err := windows.ReadFile(h, tmp[:chunk], &n, nil)
 		if n > 0 {
 			if policy.MaxBytes > 0 && int64(len(buf))+int64(n) > policy.MaxBytes {
 				return nil, FileState{}, ErrTooLarge
@@ -320,15 +339,22 @@ func winOpen(parent *windows.Handle, name *windows.NTUnicodeString, create bool)
 	err := windows.NtCreateFile(&h, windows.FILE_GENERIC_READ|windows.FILE_READ_ATTRIBUTES, &oa, &io, nil, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, disposition, windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
 	return h, err
 }
-func winCreateDirectoryAt(parent windows.Handle, name string) (windows.Handle, error) {
-	return winOpenAtCreate(parent, name)
+func winCreateDirectoryAt(parent windows.Handle, name string, policy PermissionPolicy) (windows.Handle, error) {
+	return winOpenAtCreate(parent, name, policy)
 }
-func winOpenAtCreate(parent windows.Handle, name string) (windows.Handle, error) {
+func winOpenAtCreate(parent windows.Handle, name string, policy PermissionPolicy) (windows.Handle, error) {
 	n, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
 	}
 	oa := windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), RootDirectory: parent, ObjectName: n, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE}
+	if policy.kind == permissionWindowsRestricted {
+		sd, err := winRestrictedSecurityDescriptor(policy)
+		if err != nil {
+			return 0, err
+		}
+		oa.SecurityDescriptor = sd
+	}
 	var h windows.Handle
 	var io windows.IO_STATUS_BLOCK
 	err = windows.NtCreateFile(&h, windows.FILE_GENERIC_READ|windows.FILE_READ_ATTRIBUTES|windows.DELETE, &oa, &io, nil, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_CREATE, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
@@ -338,16 +364,19 @@ func winInfo(h windows.Handle) (windows.ByHandleFileInformation, error) {
 	var info windows.ByHandleFileInformation
 	return info, windows.GetFileInformationByHandle(h, &info)
 }
-func winIdentity(h windows.Handle, info windows.ByHandleFileInformation) (Identity, error) {
-	var id Identity
-	id.platform = windowsIdentityTag
+func winIdentity(h windows.Handle, _ windows.ByHandleFileInformation) (Identity, error) {
 	var details windowsFileIDInfo
 	if err := windows.GetFileInformationByHandleEx(h, windows.FileIdInfo, (*byte)(unsafe.Pointer(&details)), uint32(unsafe.Sizeof(details))); err != nil {
 		return Identity{}, err
 	}
-	binary.LittleEndian.PutUint32(id.data[:4], info.VolumeSerialNumber)
-	copy(id.data[4:20], details.FileID[:])
-	return id, nil
+	return windowsIdentityFromFileID(details), nil
+}
+func windowsIdentityFromFileID(details windowsFileIDInfo) Identity {
+	var id Identity
+	id.platform = windowsIdentityTag
+	binary.LittleEndian.PutUint64(id.data[:8], details.VolumeSerialNumber)
+	copy(id.data[8:], details.FileID[:])
+	return id
 }
 func winCheck(h windows.Handle, info windows.ByHandleFileInformation, kind EntryKind, policy PermissionPolicy) error {
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || (kind == Directory) != (info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
@@ -406,23 +435,21 @@ func winCheckACL(h windows.Handle, policy PermissionPolicy) error {
 	}
 	return nil
 }
-func winSetRestrictedDACL(h windows.Handle, policy PermissionPolicy) error {
+func winRestrictedSecurityDescriptor(policy PermissionPolicy) (*windows.SECURITY_DESCRIPTOR, error) {
 	sddl := "D:P"
 	for _, sid := range policy.sids {
 		sddl += fmt.Sprintf("(A;;0x%X;;;%s)", policy.mask, sid)
 	}
 	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil || sd == nil {
-		return ErrUnsupportedInspection
+		return nil, ErrUnsupportedInspection
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil || dacl == nil {
-		return ErrUnsupportedInspection
+		return nil, ErrUnsupportedInspection
 	}
-	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
-		return ErrPermissions
-	}
-	return nil
+	_ = dacl
+	return sd, nil
 }
 func winDeleteCreated(h windows.Handle) {
 	var io windows.IO_STATUS_BLOCK

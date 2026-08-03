@@ -97,6 +97,12 @@ func LinuxExactPermissions(uid uint32, mode fs.FileMode) PermissionPolicy {
 	return PermissionPolicy{kind: permissionLinuxExact, uid: uid, mode: mode}
 }
 
+// WindowsRestrictedPermissions is available on every target so shared config
+// code has a stable API. Non-Windows platforms return ErrUnsupportedInspection.
+func WindowsRestrictedPermissions(allowedSIDs []string, requiredAccess uint32) (PermissionPolicy, error) {
+	return newWindowsPolicy(allowedSIDs, requiredAccess)
+}
+
 type platformRoot interface {
 	identity() Identity
 	recheck() error
