@@ -154,11 +154,14 @@ func TestLinuxExactPermissionsRejectsGroupOtherAndSpecialBits(t *testing.T) {
 	if !errors.Is(err, ErrPermissions) {
 		t.Fatalf("OpenRoot group-readable error = %v, want ErrPermissions", err)
 	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	_, err = OpenRoot(dir, RootPolicy{Access: LinuxExactPermissions(uint32(os.Getuid()+1), fs.FileMode(0o700))})
 	if !errors.Is(err, ErrPermissions) {
 		t.Fatalf("OpenRoot wrong UID error = %v, want ErrPermissions", err)
 	}
-	if err := os.Chmod(dir, 0o4700); err != nil {
+	if err := os.Chmod(dir, 0o700|fs.ModeSetuid); err != nil {
 		t.Fatal(err)
 	}
 	_, err = OpenRoot(dir, RootPolicy{Access: LinuxExactPermissions(uint32(os.Getuid()), fs.FileMode(0o700))})

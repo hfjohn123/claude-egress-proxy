@@ -16,6 +16,11 @@ import (
 
 const windowsIdentityTag = 2
 
+// Retained roots must later be reopened for identity rechecks. These rights
+// are added to each allowed SID at creation, while policy.mask remains the
+// caller's required minimum for validation.
+const windowsRetainedRootAccess = windows.FILE_GENERIC_READ
+
 type windowsRoot struct {
 	fd         windows.Handle
 	parent     windows.Handle
@@ -185,7 +190,7 @@ func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (pl
 		return nil, ErrUnsupportedInspection
 	}
 	var parentHandle windows.Handle
-	if err := windows.DuplicateHandle(windows.CurrentProcess(), p.fd, windows.CurrentProcess(), &parentHandle, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+	if err := winDuplicateParent(windows.CurrentProcess(), p.fd, windows.CurrentProcess(), &parentHandle, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
 		winDeleteCreated(h)
 		_ = windows.CloseHandle(h)
 		return nil, ErrUnsafePath
@@ -379,8 +384,8 @@ func windowsIdentityFromFileID(details windowsFileIDInfo) Identity {
 	return id
 }
 func winCheck(h windows.Handle, info windows.ByHandleFileInformation, kind EntryKind, policy PermissionPolicy) error {
-	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || (kind == Directory) != (info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
-		return ErrUnsafePath
+	if err := validateWindowsKind(info, kind); err != nil {
+		return err
 	}
 	if policy.kind == permissionIdentityOnly {
 		return nil
@@ -390,6 +395,20 @@ func winCheck(h windows.Handle, info windows.ByHandleFileInformation, kind Entry
 	}
 	return winCheckACL(h, policy)
 }
+
+func validateWindowsKind(info windows.ByHandleFileInformation, kind EntryKind) error {
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || (kind == Directory) != (info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
+		return ErrUnsafePath
+	}
+	return nil
+}
+
+type winACLRule struct {
+	aceType, aceFlags uint8
+	sid               string
+	mask              uint32
+}
+
 func winCheckACL(h windows.Handle, policy PermissionPolicy) error {
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil || sd == nil {
@@ -399,34 +418,50 @@ func winCheckACL(h windows.Handle, policy PermissionPolicy) error {
 	if err != nil {
 		return ErrUnsupportedInspection
 	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
-		return ErrPermissions
-	}
 	dacl, _, err := sd.DACL()
 	if err != nil || dacl == nil {
+		return validateWindowsACL(policy, control&windows.SE_DACL_PROTECTED != 0, false, nil)
+	}
+	rules := make([]winACLRule, 0, dacl.AceCount)
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil || ace == nil {
+			return ErrUnsupportedInspection
+		}
+		rule := winACLRule{aceType: ace.Header.AceType, aceFlags: ace.Header.AceFlags, mask: uint32(ace.Mask)}
+		if rule.aceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			rules = append(rules, rule)
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if !sid.IsValid() {
+			return ErrUnsupportedInspection
+		}
+		rule.sid = sid.String()
+		rules = append(rules, rule)
+	}
+	return validateWindowsACL(policy, control&windows.SE_DACL_PROTECTED != 0, true, rules)
+}
+
+func validateWindowsACL(policy PermissionPolicy, protected, present bool, rules []winACLRule) error {
+	if !protected || !present {
 		return ErrPermissions
 	}
 	allowed := make(map[string]uint32, len(policy.sids))
 	for _, sid := range policy.sids {
 		allowed[sid] = 0
 	}
-	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(dacl, i, &ace); err != nil || ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+	for _, rule := range rules {
+		if rule.aceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 			return ErrUnsupportedInspection
 		}
-		if ace.Header.AceFlags&windows.VALID_INHERIT_FLAGS != 0 {
+		if rule.aceFlags&windows.VALID_INHERIT_FLAGS != 0 {
 			return ErrPermissions
 		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		if !sid.IsValid() {
-			return ErrUnsupportedInspection
-		}
-		key := sid.String()
-		if _, ok := allowed[key]; !ok {
+		if _, ok := allowed[rule.sid]; !ok {
 			return ErrPermissions
 		}
-		allowed[key] |= uint32(ace.Mask)
+		allowed[rule.sid] |= rule.mask
 	}
 	for _, mask := range allowed {
 		if mask&policy.mask != policy.mask {
@@ -438,7 +473,7 @@ func winCheckACL(h windows.Handle, policy PermissionPolicy) error {
 func winRestrictedSecurityDescriptor(policy PermissionPolicy) (*windows.SECURITY_DESCRIPTOR, error) {
 	sddl := "D:P"
 	for _, sid := range policy.sids {
-		sddl += fmt.Sprintf("(A;;0x%X;;;%s)", policy.mask, sid)
+		sddl += fmt.Sprintf("(A;;0x%X;;;%s)", policy.mask|windowsRetainedRootAccess, sid)
 	}
 	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil || sd == nil {
@@ -451,7 +486,14 @@ func winRestrictedSecurityDescriptor(policy PermissionPolicy) (*windows.SECURITY
 	_ = dacl
 	return sd, nil
 }
-func winDeleteCreated(h windows.Handle) {
+
+var (
+	winDuplicateParent     = windows.DuplicateHandle
+	winDeleteCreatedHandle = winDeleteCreatedNow
+)
+
+func winDeleteCreated(h windows.Handle) { winDeleteCreatedHandle(h) }
+func winDeleteCreatedNow(h windows.Handle) {
 	var io windows.IO_STATUS_BLOCK
 	deleteFlag := byte(1)
 	_ = windows.NtSetInformationFile(h, &io, (*byte)(unsafe.Pointer(&deleteFlag)), 1, windows.FileDispositionInfo)

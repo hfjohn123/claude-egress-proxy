@@ -39,7 +39,16 @@ func TestWindowsACLPolicyRejectsUnsafeInputs(t *testing.T) {
 // TestWindowsCreateRootAppliesRestrictedDACLAtCreation catches directory
 // creation that accepts a restricted policy but never installs its DACL.
 func TestWindowsCreateRootAppliesRestrictedDACLAtCreation(t *testing.T) {
-	policy, err := WindowsRestrictedPermissions([]string{"S-1-5-32-544"}, windows.FILE_LIST_DIRECTORY)
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.FILE_LIST_DIRECTORY)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +62,13 @@ func TestWindowsCreateRootAppliesRestrictedDACLAtCreation(t *testing.T) {
 		t.Fatalf("CreateRoot restricted DACL = %v", err)
 	}
 	defer created.Close()
+	if err := created.RecheckIdentity(); err != nil {
+		t.Fatalf("restricted root RecheckIdentity = %v", err)
+	}
+	state, err := created.Inspect("absent", FilePolicy{Presence: Optional, Kind: RegularFile, Access: IdentityOnlyPermissions()})
+	if err != nil || state.Present {
+		t.Fatalf("restricted root Inspect = (%+v, %v)", state, err)
+	}
 }
 
 func TestWindowsADSLeafIsUnsafe(t *testing.T) {
@@ -64,5 +80,63 @@ func TestWindowsADSLeafIsUnsafe(t *testing.T) {
 	_, err = root.Inspect("state:secret", FilePolicy{Presence: Optional, Kind: RegularFile, Access: IdentityOnlyPermissions()})
 	if !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("ADS leaf error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestWindowsACLValidatorRejectsUnsafeDescriptors(t *testing.T) {
+	policy, err := WindowsRestrictedPermissions([]string{"S-1-5-32-544", "S-1-5-18"}, windows.FILE_LIST_DIRECTORY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowAdmin := winACLRule{aceType: windows.ACCESS_ALLOWED_ACE_TYPE, sid: "S-1-5-32-544", mask: windows.FILE_LIST_DIRECTORY}
+	for _, test := range []struct {
+		name               string
+		protected, present bool
+		rules              []winACLRule
+		want               error
+	}{
+		{"missing DACL", true, false, nil, ErrPermissions},
+		{"unprotected", false, true, []winACLRule{allowAdmin}, ErrPermissions},
+		{"foreign SID", true, true, []winACLRule{{aceType: windows.ACCESS_ALLOWED_ACE_TYPE, sid: "S-1-1-0", mask: windows.FILE_LIST_DIRECTORY}}, ErrPermissions},
+		{"deny ACE", true, true, []winACLRule{{aceType: windows.ACCESS_DENIED_ACE_TYPE}}, ErrUnsupportedInspection},
+		{"insufficient per SID", true, true, []winACLRule{allowAdmin, {aceType: windows.ACCESS_ALLOWED_ACE_TYPE, sid: "S-1-5-18", mask: 0}}, ErrPermissions},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateWindowsACL(policy, test.protected, test.present, test.rules); !errors.Is(err, test.want) {
+				t.Fatalf("error = %v, want %v", err, test.want)
+			}
+		})
+	}
+	for _, flag := range []uint8{windows.OBJECT_INHERIT_ACE, windows.CONTAINER_INHERIT_ACE, windows.NO_PROPAGATE_INHERIT_ACE, windows.INHERIT_ONLY_ACE, windows.INHERITED_ACE} {
+		if err := validateWindowsACL(policy, true, true, []winACLRule{{aceType: windows.ACCESS_ALLOWED_ACE_TYPE, aceFlags: flag, sid: "S-1-5-32-544", mask: windows.FILE_LIST_DIRECTORY}}); !errors.Is(err, ErrPermissions) {
+			t.Fatalf("inheritance flag %#x error = %v, want ErrPermissions", flag, err)
+		}
+	}
+}
+
+func TestWindowsReparseAttributeIsUnsafe(t *testing.T) {
+	if err := validateWindowsKind(windows.ByHandleFileInformation{FileAttributes: windows.FILE_ATTRIBUTE_DIRECTORY | windows.FILE_ATTRIBUTE_REPARSE_POINT}, Directory); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("reparse info error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestWindowsPostCreateFailureTargetsCreatedHandle(t *testing.T) {
+	parent, err := OpenRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	oldDuplicate, oldDelete := winDuplicateParent, winDeleteCreatedHandle
+	t.Cleanup(func() { winDuplicateParent, winDeleteCreatedHandle = oldDuplicate, oldDelete })
+	deleted := false
+	winDuplicateParent = func(windows.Handle, windows.Handle, windows.Handle, *windows.Handle, uint32, bool, uint32) error {
+		return windows.ERROR_ACCESS_DENIED
+	}
+	winDeleteCreatedHandle = func(windows.Handle) { deleted = true }
+	if _, err := CreateRoot(parent, "post-create-failure", RootPolicy{Access: IdentityOnlyPermissions()}); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("CreateRoot error = %v, want ErrUnsafePath", err)
+	}
+	if !deleted {
+		t.Fatal("post-create failure did not target created handle for deletion")
 	}
 }
