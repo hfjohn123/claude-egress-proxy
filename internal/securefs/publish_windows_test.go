@@ -7,10 +7,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
+
+var mutablePathForTest sync.Map
 
 func mutableTestRoot(t *testing.T) MutableRoot {
 	t.Helper()
@@ -23,7 +28,7 @@ func mutableTestRoot(t *testing.T) MutableRoot {
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.FILE_LIST_DIRECTORY|0x0002|0x0040)
+	policy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.FILE_LIST_DIRECTORY|0x0002|0x0004|0x0040)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,17 +52,20 @@ func mutableTestRoot(t *testing.T) MutableRoot {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
+	mutablePathForTest.Store(r, filepath.Join(base, "restricted"))
 	return r
 }
 
 func TestReplaceRetryUsesExactFiveAttemptSchedule(t *testing.T) {
 	var attempts []int
-	faults := FaultsForTestWithReplace(nil, func(run func() error) error {
+	var waits []time.Duration
+	faults := FaultsForTestWithRetry(nil, func(run func() error) error {
 		attempts = append(attempts, len(attempts))
 		return windows.ERROR_SHARING_VIOLATION
-	})
+	}, func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil })
 	r := mutableTestRoot(t)
 	p := mutableFilePolicy(Optional, 32)
+	started := time.Now()
 	err := r.WithExclusiveLock(context.Background(), "retry.lock", mutableFilePolicy(Optional, 32), func(l LockedFile) error {
 		if _, err := l.Publish(context.Background(), "state", "state.new", []byte("old"), p, AbsentTarget, NoFaults{}); err != nil {
 			return err
@@ -74,8 +82,67 @@ func TestReplaceRetryUsesExactFiveAttemptSchedule(t *testing.T) {
 	if len(attempts) != 5 {
 		t.Fatalf("replace attempts = %d, want 5", len(attempts))
 	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("persistent virtual retry elapsed = %v, want <= 200ms", elapsed)
+	}
+	if !reflect.DeepEqual(waits, []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond}) {
+		t.Fatalf("waits=%v", waits)
+	}
 	if !errors.Is(faults.hit(BeforeTempWrite), nil) {
 		t.Fatal("unexpected fault")
+	}
+}
+
+func TestReplaceRetrySucceedsAfterEachRetryDepth(t *testing.T) {
+	for depth := 1; depth <= 4; depth++ {
+		t.Run("depth-"+string(rune('0'+depth)), func(t *testing.T) {
+			r := mutableTestRoot(t)
+			p := mutableFilePolicy(Optional, 32)
+			attempts := 0
+			var waits []time.Duration
+			f := FaultsForTestWithRetry(nil, func(run func() error) error {
+				attempts++
+				if attempts <= depth {
+					return windows.ERROR_SHARING_VIOLATION
+				}
+				return run()
+			}, func(_ context.Context, delay time.Duration) error {
+				waits = append(waits, delay)
+				return nil
+			})
+			err := r.WithExclusiveLock(context.Background(), "depth.lock", mutableFilePolicy(Optional, 8), func(l LockedFile) error {
+				if _, err := l.Publish(context.Background(), "state", "state.new", []byte("old"), p, AbsentTarget, NoFaults{}); err != nil {
+					return err
+				}
+				boundary, err := l.Publish(context.Background(), "state", "state.new", []byte("new"), p, PresentTarget, f)
+				if err != nil || boundary != (CommitBoundary{NamespacePublished: true, TargetDurable: true}) {
+					t.Fatalf("depth %d result = %+v,%v", depth, boundary, err)
+				}
+				got, _, err := l.ReadFile("state", FilePolicy{Presence: Required, Kind: RegularFile, Access: p.Access, MaxBytes: p.MaxBytes})
+				if err != nil || string(got) != "new" {
+					t.Fatalf("depth %d target = %q,%v", depth, got, err)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if attempts != depth+1 {
+				t.Fatalf("depth %d attempts = %d, want %d", depth, attempts, depth+1)
+			}
+			wantWaits := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond}[:depth]
+			if !reflect.DeepEqual(waits, wantWaits) {
+				t.Fatalf("depth %d waits = %v, want %v", depth, waits, wantWaits)
+			}
+			var accumulated time.Duration
+			for _, wait := range waits {
+				accumulated += wait
+			}
+			wantAccumulated := []time.Duration{10 * time.Millisecond, 30 * time.Millisecond, 70 * time.Millisecond, 150 * time.Millisecond}[depth-1]
+			if accumulated != wantAccumulated {
+				t.Fatalf("depth %d accumulated waits = %v, want %v", depth, accumulated, wantAccumulated)
+			}
+		})
 	}
 }
 
@@ -104,6 +171,227 @@ func TestAfterPublicationNeverRetriesReplace(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("replace calls=%d,want 1", calls)
+	}
+}
+
+func TestReplaceNonSharingErrorDoesNotRetry(t *testing.T) {
+	r := mutableTestRoot(t)
+	p := mutableFilePolicy(Optional, 32)
+	calls := 0
+	f := FaultsForTestWithRetry(nil, func(func() error) error { calls++; return windows.ERROR_ACCESS_DENIED }, func(context.Context, time.Duration) error { t.Fatal("waited"); return nil })
+	err := r.WithExclusiveLock(context.Background(), "nonsharing.lock", mutableFilePolicy(Optional, 8), func(l LockedFile) error {
+		_, e := l.Publish(context.Background(), "state", "state.new", []byte("old"), p, AbsentTarget, NoFaults{})
+		if e != nil {
+			return e
+		}
+		_, e = l.Publish(context.Background(), "state", "state.new", []byte("new"), p, PresentTarget, f)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls=%d", calls)
+	}
+}
+
+func TestReplaceCancellationDuringInjectedWaitStopsBeforePublication(t *testing.T) {
+	r := mutableTestRoot(t)
+	p := mutableFilePolicy(Optional, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	f := FaultsForTestWithRetry(nil, func(func() error) error { calls++; return windows.ERROR_SHARING_VIOLATION }, func(context.Context, time.Duration) error { cancel(); return context.Canceled })
+	err := r.WithExclusiveLock(context.Background(), "cancel.lock", mutableFilePolicy(Optional, 8), func(l LockedFile) error {
+		if _, e := l.Publish(context.Background(), "state", "state.new", []byte("old"), p, AbsentTarget, NoFaults{}); e != nil {
+			return e
+		}
+		b, e := l.Publish(ctx, "state", "state.new", []byte("new"), p, PresentTarget, f)
+		if e == nil || b != (CommitBoundary{}) {
+			t.Fatalf("cancel=%+v,%v", b, e)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls=%d", calls)
+	}
+}
+
+func TestCallbackInvalidationWaitsForAdmittedMethod(t *testing.T) {
+	r := mutableTestRoot(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	returned := make(chan error, 1)
+	go func() {
+		returned <- r.WithExclusiveLock(context.Background(), "gate.lock", mutableFilePolicy(Optional, 8), func(l LockedFile) error {
+			x := l.(*windowsLockedFile)
+			if err := x.gate.begin(); err != nil {
+				return err
+			}
+			go func() { close(started); <-release; x.gate.end() }()
+			<-started
+			return nil
+		})
+	}()
+	<-started
+	closed := make(chan error, 1)
+	go func() { closed <- r.Close() }()
+	select {
+	case <-returned:
+		t.Fatal("callback returned before admitted method")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-returned; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCleanupRejectsWrongKindAndPreservesSimilarNames(t *testing.T) {
+	r := mutableTestRoot(t)
+	raw, _ := mutablePathForTest.Load(r)
+	path := raw.(string)
+	if err := os.Mkdir(filepath.Join(path, "state.new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "state.new.keep"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := mutableFilePolicy(Optional, 32)
+	err := r.WithExclusiveLock(context.Background(), "cleanup.lock", mutableFilePolicy(Optional, 8), func(l LockedFile) error {
+		e := l.CleanupReservedTemp(context.Background(), "state", "state.new", p)
+		if !errors.Is(e, ErrUnsafePath) {
+			t.Fatalf("wrong-kind cleanup=%v", e)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, e := os.ReadFile(filepath.Join(path, "state.new.keep")); e != nil || string(got) != "keep" {
+		t.Fatalf("similar preserved=%q,%v", got, e)
+	}
+}
+
+func TestCleanupRejectsWrongPolicyAndReparseTagWithoutTouchingSimilarNames(t *testing.T) {
+	r := mutableTestRoot(t)
+	raw, _ := mutablePathForTest.Load(r)
+	path := raw.(string)
+	for _, name := range []string{"unrelated", "state.new.keep", "prefixstate.new", "state.newer"} {
+		if err := os.WriteFile(filepath.Join(path, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongPolicy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.WRITE_DAC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := mutableFilePolicy(Optional, 32)
+	err = r.WithExclusiveLock(context.Background(), "cleanup-policy.lock", mutableFilePolicy(Optional, 8), func(l LockedFile) error {
+		_, e := l.Publish(context.Background(), "state", "state.new", nil, p, AbsentTarget, FaultsForTest(func(point FaultPoint) error {
+			if point == BeforeTempWrite {
+				return errors.New("leave exact temp")
+			}
+			return nil
+		}))
+		if e == nil {
+			t.Fatal("pre-write fault did not leave temp")
+		}
+		if e := l.CleanupReservedTemp(context.Background(), "state", "state.new", FilePolicy{Presence: Optional, Kind: RegularFile, Access: wrongPolicy, MaxBytes: 32}); e == nil {
+			t.Fatal("wrong-policy reserved temp accepted")
+		}
+		// This calls the production reparse-tag validator directly, making the
+		// rejection deterministic even on hosts without symlink privileges.
+		if e := validateWindowsKind(windows.ByHandleFileInformation{FileAttributes: windows.FILE_ATTRIBUTE_REPARSE_POINT}, RegularFile); !errors.Is(e, ErrUnsafePath) {
+			t.Fatalf("reparse tag = %v", e)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"unrelated", "state.new.keep", "prefixstate.new", "state.newer"} {
+		if got, err := os.ReadFile(filepath.Join(path, name)); err != nil || string(got) != name {
+			t.Fatalf("similar name %q = %q,%v", name, got, err)
+		}
+	}
+}
+
+func TestLockedFileRejectsLockNameReplacement(t *testing.T) {
+	r := mutableTestRoot(t)
+	raw, _ := mutablePathForTest.Load(r)
+	path := raw.(string)
+	err := r.WithExclusiveLock(context.Background(), "replace.lock", mutableFilePolicy(Optional, 16), func(l LockedFile) error {
+		if err := os.Rename(filepath.Join(path, "replace.lock"), filepath.Join(path, "replace.lock.old")); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(path, "replace.lock"), []byte("replacement"), 0o600); err != nil {
+			return err
+		}
+		if err := l.RecheckIdentity(); !errors.Is(err, ErrIdentityChanged) {
+			t.Fatalf("replacement recheck = %v", err)
+		}
+		if err := l.Sync(); !errors.Is(err, ErrIdentityChanged) {
+			t.Fatalf("replacement sync = %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReplaceFileKeepsShareAllReaderOnOldBytes(t *testing.T) {
+	r := mutableTestRoot(t)
+	raw, _ := mutablePathForTest.Load(r)
+	path := raw.(string)
+	p := mutableFilePolicy(Optional, 32)
+	var reader windows.Handle
+	err := r.WithExclusiveLock(context.Background(), "reader.lock", mutableFilePolicy(Optional, 8), func(l LockedFile) error {
+		if _, err := l.Publish(context.Background(), "state", "state.new", []byte("old bytes"), p, AbsentTarget, NoFaults{}); err != nil {
+			return err
+		}
+		name, err := windows.UTF16PtrFromString(filepath.Join(path, "state"))
+		if err != nil {
+			return err
+		}
+		reader, err = windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			return err
+		}
+		if _, err := l.Publish(context.Background(), "state", "state.new", []byte("new bytes"), p, PresentTarget, NoFaults{}); err != nil {
+			return err
+		}
+		return nil
+	})
+	if reader != 0 {
+		defer windows.CloseHandle(reader)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, len("old bytes"))
+	var n uint32
+	if err := windows.ReadFile(reader, buffer, &n, nil); err != nil || string(buffer[:n]) != "old bytes" {
+		t.Fatalf("old reader bytes = %q,%v", buffer[:n], err)
+	}
+	if got, err := os.ReadFile(filepath.Join(path, "state")); err != nil || string(got) != "new bytes" {
+		t.Fatalf("new open bytes = %q,%v", got, err)
 	}
 }
 

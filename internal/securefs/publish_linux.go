@@ -14,6 +14,7 @@ import (
 type linuxLockedFile struct {
 	root       *linuxRoot
 	rootPolicy RootPolicy
+	name       string
 	fd         int
 	id         Identity
 	policy     FilePolicy
@@ -56,7 +57,7 @@ func platformWithExclusiveLock(ctx context.Context, op platformRoot, rootPolicy 
 	if err != nil || linuxCheck(st, RegularFile, policy.Access) != nil {
 		return ErrIdentityChanged
 	}
-	l := &linuxLockedFile{root: r, rootPolicy: rootPolicy, fd: fd, id: linuxIdentity(st), policy: policy, gate: newLockedGate()}
+	l := &linuxLockedFile{root: r, rootPolicy: rootPolicy, name: name, fd: fd, id: linuxIdentity(st), policy: policy, gate: newLockedGate()}
 	defer l.gate.close()
 	return fn(l)
 }
@@ -113,6 +114,10 @@ func (l *linuxLockedFile) usable() error {
 	}
 	if err := linuxCheck(st, RegularFile, l.policy.Access); err != nil {
 		return err
+	}
+	state, err := l.root.inspect(l.name, FilePolicy{Presence: Required, Kind: RegularFile, Access: l.policy.Access, MaxBytes: l.policy.MaxBytes})
+	if err != nil || state.Identity != l.id {
+		return ErrIdentityChanged
 	}
 	return nil
 }
@@ -255,7 +260,7 @@ func (l *linuxLockedFile) CleanupReservedTemp(ctx context.Context, target, temp 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !validReservedNames(target, temp) || !validFilePolicy(policy) || policy.Kind != RegularFile {
+	if !validReservedNames(target, temp) || !validMutableFilePolicy(policy) {
 		return ErrUnsafePath
 	}
 	state, err := l.root.inspect(temp, FilePolicy{Presence: Optional, Kind: RegularFile, Access: policy.Access, MaxBytes: policy.MaxBytes})
@@ -298,7 +303,7 @@ func (l *linuxLockedFile) Publish(ctx context.Context, target, temp string, data
 	if err := ctx.Err(); err != nil {
 		return boundary, err
 	}
-	if !validReservedNames(target, temp) || !validFilePolicy(policy) || policy.Kind != RegularFile || (policy.MaxBytes > 0 && int64(len(data)) > policy.MaxBytes) || (mode != AbsentTarget && mode != PresentTarget) {
+	if !validReservedNames(target, temp) || !validMutableFilePolicy(policy) || (policy.MaxBytes > 0 && int64(len(data)) > policy.MaxBytes) || (mode != AbsentTarget && mode != PresentTarget) {
 		return boundary, ErrUnsafePath
 	}
 	presence := MustBeAbsent

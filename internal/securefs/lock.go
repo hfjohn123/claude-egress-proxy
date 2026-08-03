@@ -61,8 +61,12 @@ type LockedFile interface {
 func validMutableRootPolicy(policy RootPolicy) bool {
 	return policy.Access.kind == permissionLinuxExact || policy.Access.kind == permissionWindowsRestricted
 }
+func validMutableFilePolicy(policy FilePolicy) bool {
+	return validFilePolicy(policy) && policy.Presence == Optional && policy.Kind == RegularFile &&
+		(policy.Access.kind == permissionLinuxExact || policy.Access.kind == permissionWindowsRestricted)
+}
 func validLockPolicy(policy FilePolicy) bool {
-	return validFilePolicy(policy) && policy.Presence == Optional && policy.Kind == RegularFile && policy.Access.kind != permissionInvalid
+	return validMutableFilePolicy(policy)
 }
 func validReservedNames(target, temp string) bool {
 	return validLeaf(target) && validLeaf(temp) && target != temp && temp == target+".new"

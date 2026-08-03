@@ -2,9 +2,15 @@
 
 package securefs
 
+import (
+	"context"
+	"time"
+)
+
 type testFaults struct {
 	fn      func(FaultPoint) error
 	replace func(func() error) error
+	wait    func(context.Context, time.Duration) error
 }
 
 func (f testFaults) hit(point FaultPoint) error { return f.fn(point) }
@@ -24,4 +30,16 @@ func (f testFaults) replaceAttempt(run func() error) error {
 		return f.replace(run)
 	}
 	return run()
+}
+func (f testFaults) waitRetry(ctx context.Context, d time.Duration) error {
+	if f.wait != nil {
+		return f.wait(ctx, d)
+	}
+	return nil
+}
+func FaultsForTestWithRetry(fn func(FaultPoint) error, replace func(func() error) error, wait func(context.Context, time.Duration) error) Faults {
+	if fn == nil {
+		fn = func(FaultPoint) error { return nil }
+	}
+	return testFaults{fn: fn, replace: replace, wait: wait}
 }

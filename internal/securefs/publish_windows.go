@@ -17,6 +17,7 @@ import (
 type windowsLockedFile struct {
 	root       *windowsRoot
 	rootPolicy RootPolicy
+	name       string
 	fd         windows.Handle
 	id         Identity
 	policy     FilePolicy
@@ -24,6 +25,9 @@ type windowsLockedFile struct {
 }
 
 type windowsReplaceFaults interface{ replaceAttempt(func() error) error }
+type windowsRetryWaitFaults interface {
+	waitRetry(context.Context, time.Duration) error
+}
 
 func platformWithExclusiveLock(ctx context.Context, op platformRoot, rootPolicy RootPolicy, name string, policy FilePolicy, fn func(LockedFile) error) error {
 	r, ok := op.(*windowsRoot)
@@ -57,7 +61,7 @@ func platformWithExclusiveLock(ctx context.Context, op platformRoot, rootPolicy 
 	if err != nil || idErr != nil {
 		return ErrIdentityChanged
 	}
-	l := &windowsLockedFile{root: r, rootPolicy: rootPolicy, fd: h, id: id, policy: policy, gate: newLockedGate()}
+	l := &windowsLockedFile{root: r, rootPolicy: rootPolicy, name: name, fd: h, id: id, policy: policy, gate: newLockedGate()}
 	defer l.gate.close()
 	return fn(l)
 }
@@ -134,7 +138,14 @@ func (l *windowsLockedFile) usable() error {
 	if e != nil || id != l.id {
 		return ErrIdentityChanged
 	}
-	return winCheck(l.fd, info, RegularFile, l.policy.Access)
+	if err := winCheck(l.fd, info, RegularFile, l.policy.Access); err != nil {
+		return err
+	}
+	state, err := l.root.inspect(l.name, FilePolicy{Presence: Required, Kind: RegularFile, Access: l.policy.Access, MaxBytes: l.policy.MaxBytes})
+	if err != nil || state.Identity != l.id {
+		return ErrIdentityChanged
+	}
+	return nil
 }
 func (l *windowsLockedFile) Identity() Identity {
 	if l.gate.begin() != nil {
@@ -292,7 +303,7 @@ func (l *windowsLockedFile) CleanupReservedTemp(ctx context.Context, target, tem
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !validReservedNames(target, temp) || !validFilePolicy(p) || p.Kind != RegularFile {
+	if !validReservedNames(target, temp) || !validMutableFilePolicy(p) {
 		return ErrUnsafePath
 	}
 	s, e := l.root.inspect(temp, FilePolicy{Presence: Optional, Kind: RegularFile, Access: p.Access, MaxBytes: p.MaxBytes})
@@ -328,7 +339,7 @@ func (l *windowsLockedFile) Publish(ctx context.Context, target, temp string, da
 	if err := ctx.Err(); err != nil {
 		return b, err
 	}
-	if !validReservedNames(target, temp) || !validFilePolicy(p) || p.Kind != RegularFile || (p.MaxBytes > 0 && int64(len(data)) > p.MaxBytes) || (mode != AbsentTarget && mode != PresentTarget) {
+	if !validReservedNames(target, temp) || !validMutableFilePolicy(p) || (p.MaxBytes > 0 && int64(len(data)) > p.MaxBytes) || (mode != AbsentTarget && mode != PresentTarget) {
 		return b, ErrUnsafePath
 	}
 	presence := MustBeAbsent
@@ -481,6 +492,12 @@ func (l *windowsLockedFile) winReplace(ctx context.Context, temp, target string,
 		}
 		if attempt == 4 {
 			return ErrUnsafePath
+		}
+		if injected, ok := faults.(windowsRetryWaitFaults); ok {
+			if err := injected.waitRetry(ctx, delay); err != nil {
+				return err
+			}
+			continue
 		}
 		retry := timebase.Real{}.NewTimer(delay)
 		select {
