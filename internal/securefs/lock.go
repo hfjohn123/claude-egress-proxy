@@ -11,20 +11,26 @@ import (
 // lockedGate prevents a callback-spawned goroutine from issuing a syscall on a
 // lock handle after the callback has returned and the OS is free to reuse it.
 type lockedGate struct {
-	mu      sync.Mutex
-	cond    *sync.Cond
-	closing bool
-	active  int
+	mu                 sync.Mutex
+	cond               *sync.Cond
+	closing            bool
+	active             int
+	afterGateAdmission func()
 }
 
 func newLockedGate() *lockedGate { g := &lockedGate{}; g.cond = sync.NewCond(&g.mu); return g }
 func (g *lockedGate) begin() error {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if g.closing {
+		g.mu.Unlock()
 		return ErrClosed
 	}
 	g.active++
+	hook := g.afterGateAdmission
+	g.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return nil
 }
 func (g *lockedGate) end() {
@@ -61,12 +67,12 @@ type LockedFile interface {
 func validMutableRootPolicy(policy RootPolicy) bool {
 	return policy.Access.kind == permissionLinuxExact || policy.Access.kind == permissionWindowsRestricted
 }
-func validMutableFilePolicy(policy FilePolicy) bool {
-	return validFilePolicy(policy) && policy.Presence == Optional && policy.Kind == RegularFile &&
+func validMutableEntryPolicy(policy FilePolicy) bool {
+	return validFilePolicy(policy) && policy.Kind == RegularFile &&
 		(policy.Access.kind == permissionLinuxExact || policy.Access.kind == permissionWindowsRestricted)
 }
 func validLockPolicy(policy FilePolicy) bool {
-	return validMutableFilePolicy(policy)
+	return validMutableEntryPolicy(policy) && policy.Presence == Optional
 }
 func validReservedNames(target, temp string) bool {
 	return validLeaf(target) && validLeaf(temp) && target != temp && temp == target+".new"

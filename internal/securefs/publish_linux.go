@@ -260,7 +260,7 @@ func (l *linuxLockedFile) CleanupReservedTemp(ctx context.Context, target, temp 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !validReservedNames(target, temp) || !validMutableFilePolicy(policy) {
+	if !validReservedNames(target, temp) || !validMutableEntryPolicy(policy) {
 		return ErrUnsafePath
 	}
 	state, err := l.root.inspect(temp, FilePolicy{Presence: Optional, Kind: RegularFile, Access: policy.Access, MaxBytes: policy.MaxBytes})
@@ -303,7 +303,7 @@ func (l *linuxLockedFile) Publish(ctx context.Context, target, temp string, data
 	if err := ctx.Err(); err != nil {
 		return boundary, err
 	}
-	if !validReservedNames(target, temp) || !validMutableFilePolicy(policy) || (policy.MaxBytes > 0 && int64(len(data)) > policy.MaxBytes) || (mode != AbsentTarget && mode != PresentTarget) {
+	if !validReservedNames(target, temp) || !validMutableEntryPolicy(policy) || (policy.MaxBytes > 0 && int64(len(data)) > policy.MaxBytes) || (mode != AbsentTarget && mode != PresentTarget) {
 		return boundary, ErrUnsafePath
 	}
 	presence := MustBeAbsent

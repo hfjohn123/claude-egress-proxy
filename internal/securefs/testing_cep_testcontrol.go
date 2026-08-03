@@ -37,6 +37,7 @@ func (f testFaults) waitRetry(ctx context.Context, d time.Duration) error {
 	}
 	return nil
 }
+func (f testFaults) hasRetryWaitOverride() bool { return f.wait != nil }
 func FaultsForTestWithRetry(fn func(FaultPoint) error, replace func(func() error) error, wait func(context.Context, time.Duration) error) Faults {
 	if fn == nil {
 		fn = func(FaultPoint) error { return nil }

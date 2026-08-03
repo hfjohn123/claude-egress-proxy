@@ -26,6 +26,7 @@ type windowsLockedFile struct {
 
 type windowsReplaceFaults interface{ replaceAttempt(func() error) error }
 type windowsRetryWaitFaults interface {
+	hasRetryWaitOverride() bool
 	waitRetry(context.Context, time.Duration) error
 }
 
@@ -303,7 +304,7 @@ func (l *windowsLockedFile) CleanupReservedTemp(ctx context.Context, target, tem
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !validReservedNames(target, temp) || !validMutableFilePolicy(p) {
+	if !validReservedNames(target, temp) || !validMutableEntryPolicy(p) {
 		return ErrUnsafePath
 	}
 	s, e := l.root.inspect(temp, FilePolicy{Presence: Optional, Kind: RegularFile, Access: p.Access, MaxBytes: p.MaxBytes})
@@ -323,7 +324,9 @@ func (l *windowsLockedFile) CleanupReservedTemp(ctx context.Context, target, tem
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	winDeleteCreated(h)
+	if err := winMarkDelete(h); err != nil {
+		return ErrUnsafePath
+	}
 	return nil
 }
 
@@ -339,7 +342,7 @@ func (l *windowsLockedFile) Publish(ctx context.Context, target, temp string, da
 	if err := ctx.Err(); err != nil {
 		return b, err
 	}
-	if !validReservedNames(target, temp) || !validMutableFilePolicy(p) || (p.MaxBytes > 0 && int64(len(data)) > p.MaxBytes) || (mode != AbsentTarget && mode != PresentTarget) {
+	if !validReservedNames(target, temp) || !validMutableEntryPolicy(p) || (p.MaxBytes > 0 && int64(len(data)) > p.MaxBytes) || (mode != AbsentTarget && mode != PresentTarget) {
 		return b, ErrUnsafePath
 	}
 	presence := MustBeAbsent
@@ -493,7 +496,7 @@ func (l *windowsLockedFile) winReplace(ctx context.Context, temp, target string,
 		if attempt == 4 {
 			return ErrUnsafePath
 		}
-		if injected, ok := faults.(windowsRetryWaitFaults); ok {
+		if injected, ok := faults.(windowsRetryWaitFaults); ok && injected.hasRetryWaitOverride() {
 			if err := injected.waitRetry(ctx, delay); err != nil {
 				return err
 			}

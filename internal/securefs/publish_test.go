@@ -65,11 +65,15 @@ func TestPublishFaultBoundariesAndReservedTemp(t *testing.T) {
 					if tempState.Present != wantTemp {
 						t.Fatalf("temp present = %v, want %v", tempState.Present, wantTemp)
 					}
-					if tempState.Present && point == AfterTempFlush && tempState.Size != 3 {
-						t.Fatalf("flushed temp size = %d", tempState.Size)
-					}
-					if tempState.Present && point == BeforeTempWrite && tempState.Size != 0 {
-						t.Fatalf("prewrite temp size = %d", tempState.Size)
+					if tempState.Present && (point == BeforeTempWrite || point == AfterTempFlush) {
+						bytes, _, readErr := l.ReadFile("state.new", FilePolicy{Presence: Required, Kind: RegularFile, Access: policy.Access, MaxBytes: policy.MaxBytes})
+						wantBytes := []byte(nil)
+						if point == AfterTempFlush {
+							wantBytes = []byte("new")
+						}
+						if readErr != nil || string(bytes) != string(wantBytes) {
+							t.Fatalf("temp bytes at point %d = %q,%v; want %q", point, bytes, readErr, wantBytes)
+						}
 					}
 					return nil
 				})
@@ -212,7 +216,7 @@ func TestMutableAPIsRejectFullInvalidPolicyAndLeafMatrix(t *testing.T) {
 		}
 	}
 	if err := r.WithExclusiveLock(context.Background(), "matrix.lock", mutableFilePolicy(Optional, 8), func(l LockedFile) error {
-		for _, test := range invalid {
+		for _, test := range invalid[2:] {
 			if _, err := l.Publish(context.Background(), "state", "state.new", []byte("x"), test.p, AbsentTarget, NoFaults{}); !errors.Is(err, ErrUnsafePath) {
 				t.Fatalf("publish %s error = %v", test.name, err)
 			}
@@ -237,6 +241,38 @@ func TestMutableAPIsRejectFullInvalidPolicyAndLeafMatrix(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishAndCleanupAcceptRequiredPolicyWhenOperationSetsPresence(t *testing.T) {
+	r := mutableTestRoot(t)
+	p := mutableFilePolicy(Required, 32)
+	err := r.WithExclusiveLock(context.Background(), "required-policy.lock", mutableFilePolicy(Optional, 8), func(l LockedFile) error {
+		if _, err := l.Publish(context.Background(), "state", "state.new", []byte("old"), p, AbsentTarget, NoFaults{}); err != nil {
+			return err
+		}
+		if boundary, err := l.Publish(context.Background(), "state", "state.new", []byte("new"), p, PresentTarget, NoFaults{}); err != nil || boundary != (CommitBoundary{NamespacePublished: true, TargetDurable: true}) {
+			t.Fatalf("required PresentTarget = %+v,%v", boundary, err)
+		}
+		if _, err := l.Publish(context.Background(), "cleanup", "cleanup.new", nil, p, AbsentTarget, FaultsForTest(func(point FaultPoint) error {
+			if point == BeforeTempWrite {
+				return errors.New("leave temp")
+			}
+			return nil
+		})); err == nil {
+			t.Fatal("pre-write failure = nil")
+		}
+		if err := l.CleanupReservedTemp(context.Background(), "cleanup", "cleanup.new", p); err != nil {
+			t.Fatalf("required CleanupReservedTemp = %v", err)
+		}
+		state, err := l.Inspect("cleanup.new", FilePolicy{Presence: Optional, Kind: RegularFile, Access: p.Access, MaxBytes: p.MaxBytes})
+		if err != nil || state.Present {
+			t.Fatalf("cleanup temp = %+v,%v", state, err)
+		}
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 }

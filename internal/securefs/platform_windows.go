@@ -22,13 +22,14 @@ const windowsIdentityTag = 2
 const windowsRetainedRootAccess = windows.FILE_GENERIC_READ
 
 type windowsRoot struct {
-	fd         windows.Handle
-	parent     windows.Handle
-	leaf       string
-	path       string
-	volumeRoot string
-	id         Identity
-	pins       []windows.Handle
+	fd                 windows.Handle
+	parent             windows.Handle
+	leaf               string
+	path               string
+	volumeRoot         string
+	id                 Identity
+	pins               []windows.Handle
+	inspectInfoForTest func(string, windows.ByHandleFileInformation) windows.ByHandleFileInformation
 }
 
 type windowsFileIDInfo struct {
@@ -296,6 +297,9 @@ func (r *windowsRoot) inspect(name string, policy FilePolicy) (FileState, error)
 	}
 	defer windows.CloseHandle(h)
 	info, err := winInfo(h)
+	if r.inspectInfoForTest != nil {
+		info = r.inspectInfoForTest(name, info)
+	}
 	if err != nil || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		return FileState{}, ErrUnsafePath
 	}
@@ -571,9 +575,12 @@ var (
 
 func winDeleteCreated(h windows.Handle) { winDeleteCreatedHandle(h) }
 func winDeleteCreatedNow(h windows.Handle) {
+	_ = winMarkDelete(h)
+}
+func winMarkDelete(h windows.Handle) error {
 	var io windows.IO_STATUS_BLOCK
 	deleteFlag := byte(1)
-	_ = windows.NtSetInformationFile(h, &io, (*byte)(unsafe.Pointer(&deleteFlag)), 1, windows.FileDispositionInfo)
+	return windows.NtSetInformationFile(h, &io, &deleteFlag, 1, windows.FileDispositionInformation)
 }
 func winState(h windows.Handle, info windows.ByHandleFileInformation, kind EntryKind) (FileState, error) {
 	id, err := winIdentity(h, info)
