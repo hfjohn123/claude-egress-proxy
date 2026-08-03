@@ -54,3 +54,15 @@ func TestWindowsCreateRootAppliesRestrictedDACLAtCreation(t *testing.T) {
 	}
 	defer created.Close()
 }
+
+func TestWindowsADSLeafIsUnsafe(t *testing.T) {
+	root, err := OpenRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	_, err = root.Inspect("state:secret", FilePolicy{Presence: Optional, Kind: RegularFile, Access: IdentityOnlyPermissions()})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("ADS leaf error = %v, want ErrUnsafePath", err)
+	}
+}

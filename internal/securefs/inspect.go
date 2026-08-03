@@ -19,12 +19,14 @@ func boundedReadChunk(maxBytes, used int64, bufferSize int) int {
 	if maxBytes == 0 {
 		return bufferSize
 	}
-	remaining := maxBytes + 1 - used
-	if remaining <= 0 {
+	if used < 0 || used > maxBytes {
 		return 0
 	}
-	if remaining < int64(bufferSize) {
-		return int(remaining)
+	// maxBytes-used is the number of permitted bytes remaining. Compute the
+	// one-byte overflow probe only after comparison so MaxInt64 cannot wrap.
+	permitted := maxBytes - used
+	if permitted >= int64(bufferSize) {
+		return bufferSize
 	}
-	return bufferSize
+	return int(permitted + 1)
 }

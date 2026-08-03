@@ -141,20 +141,26 @@ func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (pl
 	return &linuxRoot{fd: fd, parentFD: parentFD, leaf: name, id: linuxIdentity(st)}, nil
 }
 
-// linuxCleanupBeforeExchange is a narrow deterministic seam for the rename
-// boundary test. Production leaves it nil.
-var linuxCleanupBeforeExchange func()
+// Narrow deterministic seams cover the two rename boundaries. Production
+// leaves them at their syscall implementations/nil hooks.
+var (
+	linuxCleanupBeforeExchange  func()
+	linuxCleanupAfterTombVerify func(parentFD int, tomb string)
+	linuxCleanupMakeTombstone   = linuxCleanupTombstone
+	linuxRenameExchange         = unix.Renameat2
+)
 
 func cleanupCreatedLinux(parentFD int, name string, want Identity) {
-	tomb, err := linuxCleanupTombstone(parentFD)
+	tomb, err := linuxCleanupMakeTombstone(parentFD)
 	if err != nil {
 		return
 	}
 	if linuxCleanupBeforeExchange != nil {
 		linuxCleanupBeforeExchange()
 	}
-	if err := unix.Renameat2(parentFD, name, parentFD, tomb, unix.RENAME_EXCHANGE); err != nil {
-		_ = unix.Unlinkat(parentFD, tomb, unix.AT_REMOVEDIR)
+	if err := linuxRenameExchange(parentFD, name, parentFD, tomb, unix.RENAME_EXCHANGE); err != nil {
+		// The exchange did not establish which pathname holds which identity;
+		// leave both members rather than delete a possibly swapped entry.
 		return
 	}
 	fd, err := unix.Openat(parentFD, tomb, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -166,13 +172,15 @@ func cleanupCreatedLinux(parentFD int, name string, want Identity) {
 	if statErr != nil || linuxIdentity(st) != want {
 		// Do not delete the entry now occupying tomb: it is an unverified
 		// replacement. Exchange it back and tolerate a leftover tombstone.
-		_ = unix.Renameat2(parentFD, name, parentFD, tomb, unix.RENAME_EXCHANGE)
+		_ = linuxRenameExchange(parentFD, name, parentFD, tomb, unix.RENAME_EXCHANGE)
 		return
 	}
-	// The final pathname identifies the verified just-created identity. A
-	// parent that satisfies the caller's restricted policy cannot be modified
-	// by an untrusted principal between this exchange and rmdir.
-	_ = unix.Unlinkat(parentFD, tomb, unix.AT_REMOVEDIR)
+	if linuxCleanupAfterTombVerify != nil {
+		linuxCleanupAfterTombVerify(parentFD, tomb)
+	}
+	// Linux has no handle-targeted directory unlink. The exchange has moved the
+	// verified object away from the requested member; return failure with that
+	// private remnant rather than issue any racy pathname deletion.
 }
 
 func linuxCleanupTombstone(parentFD int) (string, error) {

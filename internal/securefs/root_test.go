@@ -2,9 +2,11 @@ package securefs
 
 import (
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestOpenRootRejectsNonCanonicalAndLinkedParents catches a path preflight that
@@ -81,6 +83,9 @@ func TestBoundedReadChunkNeverExceedsOverflowProbe(t *testing.T) {
 		{max: 3, used: 3, want: 1},
 		{max: 3, used: 4, want: 0},
 		{max: 0, used: 0, want: 32 * 1024},
+		{max: math.MaxInt64, used: 0, want: 32 * 1024},
+		{max: math.MaxInt64, used: math.MaxInt64 - 1, want: 2},
+		{max: math.MaxInt64, used: math.MaxInt64, want: 1},
 	} {
 		if got := boundedReadChunk(test.max, test.used, 32*1024); got != test.want {
 			t.Fatalf("boundedReadChunk(%d, %d) = %d, want %d", test.max, test.used, got, test.want)
@@ -206,5 +211,45 @@ func TestCreateRootCreatesExactlyOneRestrictedLeaf(t *testing.T) {
 	}
 	if _, err := CreateRoot(parent, "nested/state", RootPolicy{Access: IdentityOnlyPermissions()}); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("CreateRoot nested leaf error = %v, want ErrUnsafePath", err)
+	}
+}
+
+type blockingRootOps struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingRootOps) identity() Identity                            { return Identity{platform: 99} }
+func (b *blockingRootOps) recheck() error                                { close(b.started); <-b.release; return nil }
+func (b *blockingRootOps) inspect(string, FilePolicy) (FileState, error) { return FileState{}, nil }
+func (b *blockingRootOps) readFile(string, FilePolicy) ([]byte, FileState, error) {
+	return nil, FileState{}, nil
+}
+func (b *blockingRootOps) close() error { return nil }
+
+// TestCloseWaitsForInFlightOperation catches Close releasing handles while a
+// recheck is still using them, and verifies the closed state afterwards.
+func TestCloseWaitsForInFlightOperation(t *testing.T) {
+	ops := &blockingRootOps{started: make(chan struct{}), release: make(chan struct{})}
+	r := &root{op: ops}
+	doneRecheck := make(chan error, 1)
+	go func() { doneRecheck <- r.RecheckIdentity() }()
+	<-ops.started
+	doneClose := make(chan error, 1)
+	go func() { doneClose <- r.Close() }()
+	select {
+	case err := <-doneClose:
+		t.Fatalf("Close returned before in-flight recheck: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(ops.release)
+	if err := <-doneRecheck; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-doneClose; err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RecheckIdentity(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("post-close recheck = %v, want ErrClosed", err)
 	}
 }

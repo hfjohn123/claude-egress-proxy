@@ -59,6 +59,82 @@ func TestLinuxCleanupDoesNotDeleteReplacement(t *testing.T) {
 	}
 }
 
+func TestLinuxCleanupDoesNotDeleteSwapAfterVerification(t *testing.T) {
+	parent := t.TempDir()
+	parentFD, err := unix.Open(parent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(parentFD)
+	if err := os.Mkdir(filepath.Join(parent, "created"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Openat(parentFD, "created", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := linuxStat(fd)
+	_ = unix.Close(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := linuxCleanupAfterTombVerify
+	t.Cleanup(func() { linuxCleanupAfterTombVerify = old })
+	linuxCleanupAfterTombVerify = func(parentFD int, tomb string) {
+		if err := unix.Renameat(parentFD, tomb, parentFD, "old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Mkdirat(parentFD, tomb, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleanupCreatedLinux(parentFD, "created", linuxIdentity(st))
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("cleanup removed every directory after a swap")
+	}
+}
+
+func TestLinuxCleanupRenameFailureLeavesTombstone(t *testing.T) {
+	parent := t.TempDir()
+	parentFD, err := unix.Open(parent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(parentFD)
+	if err := os.Mkdir(filepath.Join(parent, "created"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Openat(parentFD, "created", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := linuxStat(fd)
+	_ = unix.Close(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldMaker, oldRename := linuxCleanupMakeTombstone, linuxRenameExchange
+	t.Cleanup(func() { linuxCleanupMakeTombstone, linuxRenameExchange = oldMaker, oldRename })
+	linuxCleanupMakeTombstone = func(int) (string, error) {
+		if err := unix.Mkdirat(parentFD, "tomb", 0o700); err != nil {
+			return "", err
+		}
+		return "tomb", nil
+	}
+	linuxRenameExchange = func(int, string, int, string, uint) error { return unix.EIO }
+	cleanupCreatedLinux(parentFD, "created", linuxIdentity(st))
+	if _, err := os.Stat(filepath.Join(parent, "created")); err != nil {
+		t.Fatalf("created member removed after exchange failure: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(parent, "tomb")); err != nil {
+		t.Fatalf("tombstone removed after exchange failure: %v", err)
+	}
+}
+
 // TestWindowsPolicyAPIIsPresentOnLinux catches shared configuration code that
 // cannot compile on Linux merely because it names a Windows policy constructor.
 func TestWindowsPolicyAPIIsPresentOnLinux(t *testing.T) {
@@ -77,6 +153,17 @@ func TestLinuxExactPermissionsRejectsGroupOtherAndSpecialBits(t *testing.T) {
 	_, err := OpenRoot(dir, RootPolicy{Access: LinuxExactPermissions(uint32(os.Getuid()), fs.FileMode(0o700))})
 	if !errors.Is(err, ErrPermissions) {
 		t.Fatalf("OpenRoot group-readable error = %v, want ErrPermissions", err)
+	}
+	_, err = OpenRoot(dir, RootPolicy{Access: LinuxExactPermissions(uint32(os.Getuid()+1), fs.FileMode(0o700))})
+	if !errors.Is(err, ErrPermissions) {
+		t.Fatalf("OpenRoot wrong UID error = %v, want ErrPermissions", err)
+	}
+	if err := os.Chmod(dir, 0o4700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = OpenRoot(dir, RootPolicy{Access: LinuxExactPermissions(uint32(os.Getuid()), fs.FileMode(0o700))})
+	if !errors.Is(err, ErrPermissions) {
+		t.Fatalf("OpenRoot special-bit error = %v, want ErrPermissions", err)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
