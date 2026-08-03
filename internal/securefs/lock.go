@@ -2,10 +2,47 @@ package securefs
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/timebase"
 )
+
+// lockedGate prevents a callback-spawned goroutine from issuing a syscall on a
+// lock handle after the callback has returned and the OS is free to reuse it.
+type lockedGate struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	closing bool
+	active  int
+}
+
+func newLockedGate() *lockedGate { g := &lockedGate{}; g.cond = sync.NewCond(&g.mu); return g }
+func (g *lockedGate) begin() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closing {
+		return ErrClosed
+	}
+	g.active++
+	return nil
+}
+func (g *lockedGate) end() {
+	g.mu.Lock()
+	g.active--
+	if g.active == 0 {
+		g.cond.Broadcast()
+	}
+	g.mu.Unlock()
+}
+func (g *lockedGate) close() {
+	g.mu.Lock()
+	g.closing = true
+	for g.active != 0 {
+		g.cond.Wait()
+	}
+	g.mu.Unlock()
+}
 
 type LockedFile interface {
 	Identity() Identity

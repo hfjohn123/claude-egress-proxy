@@ -154,7 +154,7 @@ func OpenMutableRoot(path string, policy RootPolicy) (MutableRoot, error) {
 	if !validMutableRootPolicy(policy) || !platformCleanAbsolute(path) {
 		return nil, ErrUnsafePath
 	}
-	op, err := platformOpenRoot(path, policy)
+	op, err := platformOpenMutableRoot(path, policy)
 	if err != nil {
 		return nil, err
 	}

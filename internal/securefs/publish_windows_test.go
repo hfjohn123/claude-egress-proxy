@@ -3,6 +3,7 @@
 package securefs
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -45,6 +46,51 @@ func mutableTestRoot(t *testing.T) MutableRoot {
 	}
 	t.Cleanup(func() { _ = r.Close() })
 	return r
+}
+
+// TestMutableRootPinsWindowsNamespace catches path-based publication escaping
+// through a renamed selected root or a renamed higher ancestor.
+func TestMutableRootPinsWindowsNamespace(t *testing.T) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPolicy, err := WindowsRestrictedPermissions([]string{user.User.Sid.String()}, windows.FILE_LIST_DIRECTORY|0x0002|0x0040)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "ancestor")
+	if err := os.Mkdir(ancestor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := OpenRoot(ancestor, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := CreateRoot(parent, "state", RootPolicy{Access: rootPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = created.Close()
+	_ = parent.Close()
+	path := filepath.Join(ancestor, "state")
+	r, err := OpenMutableRoot(path, RootPolicy{Access: rootPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if err := os.Rename(path, filepath.Join(ancestor, "moved-state")); err == nil {
+		t.Fatal("selected-root rename succeeded while mutable root pinned")
+	}
+	if err := os.Rename(ancestor, filepath.Join(base, "moved-ancestor")); err == nil {
+		t.Fatal("ancestor rename succeeded while mutable root pinned")
+	}
 }
 func mutableFilePolicy(p Presence, max int64) FilePolicy {
 	token, err := windows.OpenCurrentProcessToken()

@@ -28,6 +28,7 @@ type windowsRoot struct {
 	path       string
 	volumeRoot string
 	id         Identity
+	pins       []windows.Handle
 }
 
 type windowsFileIDInfo struct {
@@ -83,6 +84,12 @@ func newWindowsPolicy(allowedSIDs []string, requiredAccess uint32) (PermissionPo
 }
 
 func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
+	return platformOpenRootWithPins(path, policy, false)
+}
+func platformOpenMutableRoot(path string, policy RootPolicy) (platformRoot, error) {
+	return platformOpenRootWithPins(path, policy, true)
+}
+func platformOpenRootWithPins(path string, policy RootPolicy, mutable bool) (platformRoot, error) {
 	volume := filepath.VolumeName(path)
 	rootPath := volume + `\`
 	fd, err := winOpenAbsolute(rootPath)
@@ -102,6 +109,22 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 	if policy.ExcludedAncestor != (Identity{}) && rootID == policy.ExcludedAncestor {
 		_ = windows.CloseHandle(fd)
 		return nil, ErrUnsafePath
+	}
+	var pins []windows.Handle
+	if mutable {
+		pin, pinErr := winOpenAbsolutePinned(rootPath)
+		if pinErr != nil {
+			_ = windows.CloseHandle(fd)
+			return nil, ErrUnsafePath
+		}
+		pinInfo, pinErr := winInfo(pin)
+		pinID, idErr := winIdentity(pin, pinInfo)
+		if pinErr != nil || idErr != nil || pinID != rootID {
+			_ = windows.CloseHandle(pin)
+			_ = windows.CloseHandle(fd)
+			return nil, ErrIdentityChanged
+		}
+		pins = append(pins, pin)
 	}
 	parts := strings.FieldsFunc(strings.TrimPrefix(path[len(volume):], `\`), func(r rune) bool { return r == '\\' || r == '/' })
 	if len(parts) == 0 {
@@ -123,7 +146,7 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 			_ = windows.CloseHandle(fd)
 			return nil, ErrUnsafePath
 		}
-		return &windowsRoot{fd: fd, volumeRoot: rootPath, path: rootPath, id: id}, nil
+		return &windowsRoot{fd: fd, volumeRoot: rootPath, path: rootPath, id: id, pins: pins}, nil
 	}
 	for i, part := range parts {
 		next, err := winOpenAt(fd, part, false)
@@ -148,13 +171,32 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 			_ = windows.CloseHandle(fd)
 			return nil, ErrUnsafePath
 		}
+		if mutable {
+			pin, pinErr := winOpenAtPinned(fd, part)
+			if pinErr != nil {
+				_ = windows.CloseHandle(next)
+				_ = windows.CloseHandle(fd)
+				closeWindowsPins(pins)
+				return nil, ErrUnsafePath
+			}
+			pinInfo, pinErr := winInfo(pin)
+			pinID, idErr := winIdentity(pin, pinInfo)
+			if pinErr != nil || idErr != nil || pinID != id {
+				_ = windows.CloseHandle(pin)
+				_ = windows.CloseHandle(next)
+				_ = windows.CloseHandle(fd)
+				closeWindowsPins(pins)
+				return nil, ErrIdentityChanged
+			}
+			pins = append(pins, pin)
+		}
 		if i == len(parts)-1 {
 			if err := winCheck(next, info, Directory, policy.Access); err != nil {
 				_ = windows.CloseHandle(next)
 				_ = windows.CloseHandle(fd)
 				return nil, err
 			}
-			return &windowsRoot{fd: next, parent: fd, leaf: part, path: path, id: id}, nil
+			return &windowsRoot{fd: next, parent: fd, leaf: part, path: path, id: id, pins: pins}, nil
 		}
 		_ = windows.CloseHandle(fd)
 		fd = next
@@ -314,7 +356,15 @@ func (r *windowsRoot) close() error {
 	if r.parent != 0 {
 		_ = windows.CloseHandle(r.parent)
 	}
+	closeWindowsPins(r.pins)
 	return nil
+}
+func closeWindowsPins(pins []windows.Handle) {
+	for _, h := range pins {
+		if h != 0 {
+			_ = windows.CloseHandle(h)
+		}
+	}
 }
 
 func winOpenAbsolute(path string) (windows.Handle, error) {
@@ -324,6 +374,13 @@ func winOpenAbsolute(path string) (windows.Handle, error) {
 	}
 	return winOpen(nil, name, false)
 }
+func winOpenAbsolutePinned(path string) (windows.Handle, error) {
+	name, err := windows.NewNTUnicodeString(`\??\` + path)
+	if err != nil {
+		return 0, err
+	}
+	return winOpenWithShare(nil, name, false, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+}
 func winOpenAt(parent windows.Handle, name string, create bool) (windows.Handle, error) {
 	n, err := windows.NewNTUnicodeString(name)
 	if err != nil {
@@ -331,7 +388,17 @@ func winOpenAt(parent windows.Handle, name string, create bool) (windows.Handle,
 	}
 	return winOpen(&parent, n, create)
 }
+func winOpenAtPinned(parent windows.Handle, name string) (windows.Handle, error) {
+	n, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return 0, err
+	}
+	return winOpenWithShare(&parent, n, false, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+}
 func winOpen(parent *windows.Handle, name *windows.NTUnicodeString, create bool) (windows.Handle, error) {
+	return winOpenWithShare(parent, name, create, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+}
+func winOpenWithShare(parent *windows.Handle, name *windows.NTUnicodeString, create bool, share uint32) (windows.Handle, error) {
 	oa := windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), ObjectName: name, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE}
 	if parent != nil {
 		oa.RootDirectory = *parent
@@ -342,7 +409,7 @@ func winOpen(parent *windows.Handle, name *windows.NTUnicodeString, create bool)
 	if create {
 		disposition = windows.FILE_CREATE
 	}
-	err := windows.NtCreateFile(&h, windows.FILE_GENERIC_READ|windows.FILE_READ_ATTRIBUTES, &oa, &io, nil, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, disposition, windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	err := windows.NtCreateFile(&h, windows.FILE_GENERIC_READ|windows.FILE_READ_ATTRIBUTES, &oa, &io, nil, 0, share, disposition, windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
 	return h, err
 }
 func winCreateDirectoryAt(parent windows.Handle, name string, policy PermissionPolicy) (windows.Handle, error) {

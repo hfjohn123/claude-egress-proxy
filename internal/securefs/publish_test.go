@@ -5,6 +5,7 @@ package securefs
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 )
 
@@ -36,7 +37,7 @@ func TestPublishFaultBoundariesAndReservedTemp(t *testing.T) {
 						t.Fatal("Publish fault = nil")
 					}
 					wantPublished := point == AfterPublication || point == AfterTargetDurability
-					wantDurable := point == AfterTargetDurability
+					wantDurable := point == AfterTargetDurability || (!present && point == AfterPublication)
 					if boundary != (CommitBoundary{NamespacePublished: wantPublished, TargetDurable: wantDurable}) {
 						t.Fatalf("boundary = %+v", boundary)
 					}
@@ -47,6 +48,27 @@ func TestPublishFaultBoundariesAndReservedTemp(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestLockedFileInvalidatesAfterCallbackGoexit(t *testing.T) {
+	r := mutableTestRoot(t)
+	var held LockedFile
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = r.WithExclusiveLock(context.Background(), "goexit.lock", mutableFilePolicy(Optional, 16), func(l LockedFile) error {
+			held = l
+			runtime.Goexit()
+			return nil
+		})
+	}()
+	<-done
+	if held == nil {
+		t.Fatal("callback did not receive locked file")
+	}
+	if err := held.Sync(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("post-Goexit Sync = %v, want ErrClosed", err)
 	}
 }
 

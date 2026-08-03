@@ -17,7 +17,7 @@ type linuxLockedFile struct {
 	fd         int
 	id         Identity
 	policy     FilePolicy
-	closed     bool
+	gate       *lockedGate
 }
 
 func platformWithExclusiveLock(ctx context.Context, op platformRoot, rootPolicy RootPolicy, name string, policy FilePolicy, fn func(LockedFile) error) error {
@@ -56,10 +56,9 @@ func platformWithExclusiveLock(ctx context.Context, op platformRoot, rootPolicy 
 	if err != nil || linuxCheck(st, RegularFile, policy.Access) != nil {
 		return ErrIdentityChanged
 	}
-	l := &linuxLockedFile{root: r, rootPolicy: rootPolicy, fd: fd, id: linuxIdentity(st), policy: policy}
-	err = fn(l)
-	l.closed = true
-	return err
+	l := &linuxLockedFile{root: r, rootPolicy: rootPolicy, fd: fd, id: linuxIdentity(st), policy: policy, gate: newLockedGate()}
+	defer l.gate.close()
+	return fn(l)
 }
 
 func linuxOpenLock(r *linuxRoot, name string, policy FilePolicy) (int, bool, error) {
@@ -101,9 +100,6 @@ func linuxLockContext(ctx context.Context, fd int) error {
 	}
 }
 func (l *linuxLockedFile) usable() error {
-	if l.closed {
-		return ErrClosed
-	}
 	if err := l.root.recheck(); err != nil {
 		return err
 	}
@@ -121,13 +117,27 @@ func (l *linuxLockedFile) usable() error {
 	return nil
 }
 func (l *linuxLockedFile) Identity() Identity {
+	if l.gate.begin() != nil {
+		return Identity{}
+	}
+	defer l.gate.end()
 	if l.usable() != nil {
 		return Identity{}
 	}
 	return l.id
 }
-func (l *linuxLockedFile) RecheckIdentity() error { return l.usable() }
+func (l *linuxLockedFile) RecheckIdentity() error {
+	if err := l.gate.begin(); err != nil {
+		return err
+	}
+	defer l.gate.end()
+	return l.usable()
+}
 func (l *linuxLockedFile) Size() (int64, error) {
+	if err := l.gate.begin(); err != nil {
+		return 0, err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return 0, err
 	}
@@ -138,6 +148,10 @@ func (l *linuxLockedFile) Size() (int64, error) {
 	return st.Size, nil
 }
 func (l *linuxLockedFile) ReadAt(b []byte, off int64) (int, error) {
+	if err := l.gate.begin(); err != nil {
+		return 0, err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return 0, err
 	}
@@ -151,6 +165,10 @@ func (l *linuxLockedFile) ReadAt(b []byte, off int64) (int, error) {
 	return n, nil
 }
 func (l *linuxLockedFile) WriteAt(b []byte, off int64) (int, error) {
+	if err := l.gate.begin(); err != nil {
+		return 0, err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return 0, err
 	}
@@ -168,6 +186,10 @@ func (l *linuxLockedFile) WriteAt(b []byte, off int64) (int, error) {
 	return n, nil
 }
 func (l *linuxLockedFile) Truncate(size int64) error {
+	if err := l.gate.begin(); err != nil {
+		return err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return err
 	}
@@ -183,6 +205,10 @@ func (l *linuxLockedFile) Truncate(size int64) error {
 	return nil
 }
 func (l *linuxLockedFile) Sync() error {
+	if err := l.gate.begin(); err != nil {
+		return err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return err
 	}
@@ -192,6 +218,10 @@ func (l *linuxLockedFile) Sync() error {
 	return nil
 }
 func (l *linuxLockedFile) Inspect(name string, policy FilePolicy) (FileState, error) {
+	if err := l.gate.begin(); err != nil {
+		return FileState{}, err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return FileState{}, err
 	}
@@ -201,6 +231,10 @@ func (l *linuxLockedFile) Inspect(name string, policy FilePolicy) (FileState, er
 	return l.root.inspect(name, policy)
 }
 func (l *linuxLockedFile) ReadFile(name string, policy FilePolicy) ([]byte, FileState, error) {
+	if err := l.gate.begin(); err != nil {
+		return nil, FileState{}, err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return nil, FileState{}, err
 	}
@@ -211,6 +245,10 @@ func (l *linuxLockedFile) ReadFile(name string, policy FilePolicy) ([]byte, File
 }
 
 func (l *linuxLockedFile) CleanupReservedTemp(ctx context.Context, target, temp string, policy FilePolicy) error {
+	if err := l.gate.begin(); err != nil {
+		return err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return err
 	}
@@ -249,6 +287,10 @@ func (l *linuxLockedFile) CleanupReservedTemp(ctx context.Context, target, temp 
 }
 
 func (l *linuxLockedFile) Publish(ctx context.Context, target, temp string, data []byte, policy FilePolicy, mode PublishMode, faults Faults) (CommitBoundary, error) {
+	if err := l.gate.begin(); err != nil {
+		return CommitBoundary{}, err
+	}
+	defer l.gate.end()
 	var boundary CommitBoundary
 	if err := l.usable(); err != nil {
 		return boundary, err

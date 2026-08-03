@@ -104,6 +104,10 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 	return nil, ErrUnsafePath
 }
 
+func platformOpenMutableRoot(path string, policy RootPolicy) (platformRoot, error) {
+	return platformOpenRoot(path, policy)
+}
+
 func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (platformRoot, error) {
 	p, ok := parent.(*linuxRoot)
 	if !ok {

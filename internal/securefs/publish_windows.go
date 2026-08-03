@@ -20,7 +20,7 @@ type windowsLockedFile struct {
 	fd         windows.Handle
 	id         Identity
 	policy     FilePolicy
-	closed     bool
+	gate       *lockedGate
 }
 
 func platformWithExclusiveLock(ctx context.Context, op platformRoot, rootPolicy RootPolicy, name string, policy FilePolicy, fn func(LockedFile) error) error {
@@ -55,10 +55,9 @@ func platformWithExclusiveLock(ctx context.Context, op platformRoot, rootPolicy 
 	if err != nil || idErr != nil {
 		return ErrIdentityChanged
 	}
-	l := &windowsLockedFile{root: r, rootPolicy: rootPolicy, fd: h, id: id, policy: policy}
-	err = fn(l)
-	l.closed = true
-	return err
+	l := &windowsLockedFile{root: r, rootPolicy: rootPolicy, fd: h, id: id, policy: policy, gate: newLockedGate()}
+	defer l.gate.close()
+	return fn(l)
 }
 
 func winOpenLock(r *windowsRoot, name string, policy FilePolicy) (windows.Handle, bool, error) {
@@ -118,9 +117,6 @@ func winLockContext(ctx context.Context, h windows.Handle) error {
 	}
 }
 func (l *windowsLockedFile) usable() error {
-	if l.closed {
-		return ErrClosed
-	}
 	if err := l.root.recheck(); err != nil {
 		return err
 	}
@@ -139,13 +135,27 @@ func (l *windowsLockedFile) usable() error {
 	return winCheck(l.fd, info, RegularFile, l.policy.Access)
 }
 func (l *windowsLockedFile) Identity() Identity {
+	if l.gate.begin() != nil {
+		return Identity{}
+	}
+	defer l.gate.end()
 	if l.usable() != nil {
 		return Identity{}
 	}
 	return l.id
 }
-func (l *windowsLockedFile) RecheckIdentity() error { return l.usable() }
+func (l *windowsLockedFile) RecheckIdentity() error {
+	if err := l.gate.begin(); err != nil {
+		return err
+	}
+	defer l.gate.end()
+	return l.usable()
+}
 func (l *windowsLockedFile) Size() (int64, error) {
+	if err := l.gate.begin(); err != nil {
+		return 0, err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return 0, err
 	}
@@ -156,6 +166,10 @@ func (l *windowsLockedFile) Size() (int64, error) {
 	return int64(uint64(i.FileSizeHigh)<<32 | uint64(i.FileSizeLow)), nil
 }
 func (l *windowsLockedFile) ReadAt(b []byte, off int64) (int, error) {
+	if err := l.gate.begin(); err != nil {
+		return 0, err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return 0, err
 	}
@@ -173,6 +187,10 @@ func (l *windowsLockedFile) ReadAt(b []byte, off int64) (int, error) {
 	return int(n), nil
 }
 func (l *windowsLockedFile) WriteAt(b []byte, off int64) (int, error) {
+	if err := l.gate.begin(); err != nil {
+		return 0, err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return 0, err
 	}
@@ -201,6 +219,10 @@ func winSeek(h windows.Handle, off int64) (int64, error) {
 	return int64(uint64(uint32(hi))<<32 | uint64(lo)), nil
 }
 func (l *windowsLockedFile) Truncate(n int64) error {
+	if err := l.gate.begin(); err != nil {
+		return err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return err
 	}
@@ -219,6 +241,10 @@ func (l *windowsLockedFile) Truncate(n int64) error {
 	return nil
 }
 func (l *windowsLockedFile) Sync() error {
+	if err := l.gate.begin(); err != nil {
+		return err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return err
 	}
@@ -228,6 +254,10 @@ func (l *windowsLockedFile) Sync() error {
 	return nil
 }
 func (l *windowsLockedFile) Inspect(n string, p FilePolicy) (FileState, error) {
+	if err := l.gate.begin(); err != nil {
+		return FileState{}, err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return FileState{}, err
 	}
@@ -237,6 +267,10 @@ func (l *windowsLockedFile) Inspect(n string, p FilePolicy) (FileState, error) {
 	return l.root.inspect(n, p)
 }
 func (l *windowsLockedFile) ReadFile(n string, p FilePolicy) ([]byte, FileState, error) {
+	if err := l.gate.begin(); err != nil {
+		return nil, FileState{}, err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return nil, FileState{}, err
 	}
@@ -246,6 +280,10 @@ func (l *windowsLockedFile) ReadFile(n string, p FilePolicy) ([]byte, FileState,
 	return l.root.readFile(n, p)
 }
 func (l *windowsLockedFile) CleanupReservedTemp(ctx context.Context, target, temp string, p FilePolicy) error {
+	if err := l.gate.begin(); err != nil {
+		return err
+	}
+	defer l.gate.end()
 	if err := l.usable(); err != nil {
 		return err
 	}
@@ -277,6 +315,10 @@ func (l *windowsLockedFile) CleanupReservedTemp(ctx context.Context, target, tem
 }
 
 func (l *windowsLockedFile) Publish(ctx context.Context, target, temp string, data []byte, p FilePolicy, mode PublishMode, f Faults) (CommitBoundary, error) {
+	if err := l.gate.begin(); err != nil {
+		return CommitBoundary{}, err
+	}
+	defer l.gate.end()
 	var b CommitBoundary
 	if err := l.usable(); err != nil {
 		return b, err
@@ -301,7 +343,11 @@ func (l *windowsLockedFile) Publish(ctx context.Context, target, temp string, da
 	if err != nil {
 		return b, ErrUnsafePath
 	}
-	defer windows.CloseHandle(h)
+	defer func() {
+		if h != 0 {
+			_ = windows.CloseHandle(h)
+		}
+	}()
 	if f == nil {
 		f = NoFaults{}
 	}
@@ -329,6 +375,7 @@ func (l *windowsLockedFile) Publish(ctx context.Context, target, temp string, da
 	// bytes and metadata have been flushed. The exact reserved pathname remains
 	// available for the allowed pre-publication remnant on later failure.
 	_ = windows.CloseHandle(h)
+	h = 0
 	if mode == PresentTarget {
 		err = l.winReplace(ctx, temp, target)
 	} else {
@@ -338,11 +385,22 @@ func (l *windowsLockedFile) Publish(ctx context.Context, target, temp string, da
 		return b, err
 	}
 	b.NamespacePublished = true
+	if mode == AbsentTarget {
+		// MOVEFILE_WRITE_THROUGH is the complete absent-target durability
+		// sequence; there is no later target flush boundary on this branch.
+		b.TargetDurable = true
+	}
 	if err := f.hit(AfterPublication); err != nil {
 		return b, err
 	}
 	if err := ctx.Err(); err != nil {
 		return b, err
+	}
+	if mode == AbsentTarget {
+		if err := f.hit(AfterTargetDurability); err != nil {
+			return b, err
+		}
+		return b, nil
 	}
 	th, err := winOpenState(l.root.fd, target, false, p)
 	if err != nil {
@@ -385,8 +443,6 @@ func (l *windowsLockedFile) winMove(temp, target string) error {
 	return nil
 }
 
-var winReplaceFile = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
-
 func (l *windowsLockedFile) winReplace(ctx context.Context, temp, target string) error {
 	a, e := l.winPath(temp)
 	if e != nil {
@@ -401,7 +457,8 @@ func (l *windowsLockedFile) winReplace(ctx context.Context, temp, target string)
 	deadline := timebase.Real{}.NewTimer(200 * time.Millisecond)
 	defer deadline.Stop()
 	for attempt, delay := 0, 10*time.Millisecond; attempt < 5; attempt, delay = attempt+1, delay*2 {
-		r, _, callErr := winReplaceFile.Call(uintptr(unsafe.Pointer(pb)), uintptr(unsafe.Pointer(pa)), 0, 0, 0, 0)
+		replaceFile := windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
+		r, _, callErr := replaceFile.Call(uintptr(unsafe.Pointer(pb)), uintptr(unsafe.Pointer(pa)), 0, 0, 0, 0)
 		if r != 0 {
 			return nil
 		}
