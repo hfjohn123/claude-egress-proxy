@@ -3,6 +3,7 @@
 package securefs
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"sync"
@@ -70,6 +71,14 @@ type Root interface {
 	Close() error
 }
 
+// MutableRoot retains a validated directory with the rights necessary to
+// create, replace, and remove its explicitly named state files. Mutations are
+// intentionally available only through a held OS lock callback.
+type MutableRoot interface {
+	Root
+	WithExclusiveLock(context.Context, string, FilePolicy, func(LockedFile) error) error
+}
+
 type permissionKind uint8
 
 const (
@@ -117,6 +126,19 @@ type root struct {
 	op     platformRoot
 }
 
+// mutableRoot uses operation leases instead of a root-wide RWMutex. Close
+// first closes admission, then waits for the complete lock callback (including
+// publication) before releasing the retained directory handles.
+type mutableRoot struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	closing bool
+	closed  bool
+	active  int
+	op      platformRoot
+	policy  RootPolicy
+}
+
 func OpenRoot(path string, policy RootPolicy) (Root, error) {
 	if !validRootPolicy(policy) || !platformCleanAbsolute(path) {
 		return nil, ErrUnsafePath
@@ -126,6 +148,19 @@ func OpenRoot(path string, policy RootPolicy) (Root, error) {
 		return nil, err
 	}
 	return &root{op: op}, nil
+}
+
+func OpenMutableRoot(path string, policy RootPolicy) (MutableRoot, error) {
+	if !validMutableRootPolicy(policy) || !platformCleanAbsolute(path) {
+		return nil, ErrUnsafePath
+	}
+	op, err := platformOpenRoot(path, policy)
+	if err != nil {
+		return nil, err
+	}
+	r := &mutableRoot{op: op, policy: policy}
+	r.cond = sync.NewCond(&r.mu)
+	return r, nil
 }
 
 func CreateRoot(parent Root, name string, policy RootPolicy) (Root, error) {
@@ -158,6 +193,27 @@ func ValidateOutput(path string, checkout Identity, parentPolicy RootPolicy, out
 	}
 	parentPolicy.ExcludedAncestor = checkout
 	parent, err = OpenRoot(parentPath, parentPolicy)
+	if err != nil {
+		return nil, "", FileState{}, err
+	}
+	state, err = parent.Inspect(name, outputPolicy)
+	if err != nil {
+		_ = parent.Close()
+		return nil, "", FileState{}, err
+	}
+	return parent, name, state, nil
+}
+
+func ValidateMutableOutput(path string, checkout Identity, parentPolicy RootPolicy, outputPolicy FilePolicy) (parent MutableRoot, name string, state FileState, err error) {
+	if !validFilePolicy(outputPolicy) || !platformCleanAbsolute(path) {
+		return nil, "", FileState{}, ErrUnsafePath
+	}
+	parentPath, name, err := platformSplitOutput(path)
+	if err != nil {
+		return nil, "", FileState{}, err
+	}
+	parentPolicy.ExcludedAncestor = checkout
+	parent, err = OpenMutableRoot(parentPath, parentPolicy)
 	if err != nil {
 		return nil, "", FileState{}, err
 	}
@@ -216,4 +272,88 @@ func (r *root) Close() error {
 	}
 	r.closed = true
 	return r.op.close()
+}
+
+func (r *mutableRoot) lease() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closing || r.closed {
+		return ErrClosed
+	}
+	r.active++
+	return nil
+}
+func (r *mutableRoot) release() {
+	r.mu.Lock()
+	r.active--
+	if r.active == 0 {
+		r.cond.Broadcast()
+	}
+	r.mu.Unlock()
+}
+func (r *mutableRoot) Identity() Identity {
+	if r.lease() != nil {
+		return Identity{}
+	}
+	defer r.release()
+	return r.op.identity()
+}
+func (r *mutableRoot) RecheckIdentity() error {
+	if err := r.lease(); err != nil {
+		return err
+	}
+	defer r.release()
+	return r.op.recheck()
+}
+func (r *mutableRoot) Inspect(name string, policy FilePolicy) (FileState, error) {
+	if !validLeaf(name) || !validFilePolicy(policy) {
+		return FileState{}, ErrUnsafePath
+	}
+	if err := r.lease(); err != nil {
+		return FileState{}, err
+	}
+	defer r.release()
+	return r.op.inspect(name, policy)
+}
+func (r *mutableRoot) ReadFile(name string, policy FilePolicy) ([]byte, FileState, error) {
+	if !validLeaf(name) || !validFilePolicy(policy) || policy.Kind != RegularFile || policy.Presence != Required {
+		return nil, FileState{}, ErrUnsafePath
+	}
+	if err := r.lease(); err != nil {
+		return nil, FileState{}, err
+	}
+	defer r.release()
+	return r.op.readFile(name, policy)
+}
+func (r *mutableRoot) WithExclusiveLock(ctx context.Context, name string, policy FilePolicy, fn func(LockedFile) error) error {
+	if ctx == nil || fn == nil || !validLockPolicy(policy) || !validLeaf(name) {
+		return ErrUnsafePath
+	}
+	if err := r.lease(); err != nil {
+		return err
+	}
+	defer r.release()
+	if err := r.op.recheck(); err != nil {
+		return err
+	}
+	return platformWithExclusiveLock(ctx, r.op, r.policy, name, policy, fn)
+}
+func (r *mutableRoot) Close() error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closing = true
+	for r.active != 0 {
+		r.cond.Wait()
+	}
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	err := r.op.close()
+	r.mu.Unlock()
+	return err
 }

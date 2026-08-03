@@ -25,6 +25,7 @@ type windowsRoot struct {
 	fd         windows.Handle
 	parent     windows.Handle
 	leaf       string
+	path       string
 	volumeRoot string
 	id         Identity
 }
@@ -122,7 +123,7 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 			_ = windows.CloseHandle(fd)
 			return nil, ErrUnsafePath
 		}
-		return &windowsRoot{fd: fd, volumeRoot: rootPath, id: id}, nil
+		return &windowsRoot{fd: fd, volumeRoot: rootPath, path: rootPath, id: id}, nil
 	}
 	for i, part := range parts {
 		next, err := winOpenAt(fd, part, false)
@@ -153,7 +154,7 @@ func platformOpenRoot(path string, policy RootPolicy) (platformRoot, error) {
 				_ = windows.CloseHandle(fd)
 				return nil, err
 			}
-			return &windowsRoot{fd: next, parent: fd, leaf: part, id: id}, nil
+			return &windowsRoot{fd: next, parent: fd, leaf: part, path: path, id: id}, nil
 		}
 		_ = windows.CloseHandle(fd)
 		fd = next
@@ -195,7 +196,7 @@ func platformCreateRoot(parent platformRoot, name string, policy RootPolicy) (pl
 		_ = windows.CloseHandle(h)
 		return nil, ErrUnsafePath
 	}
-	return &windowsRoot{fd: h, parent: parentHandle, leaf: name, id: id}, nil
+	return &windowsRoot{fd: h, parent: parentHandle, leaf: name, path: filepath.Join(p.path, name), id: id}, nil
 }
 
 func (r *windowsRoot) identity() Identity { return r.id }
