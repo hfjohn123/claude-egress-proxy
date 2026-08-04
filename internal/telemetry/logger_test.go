@@ -197,9 +197,11 @@ func TestLoggerWaitQuiescentExcludesLaterEpoch(t *testing.T) {
 	firstDone := make(chan struct{})
 	go func() { l.Submit(Record{json: `{"first":true}`}); close(firstDone) }()
 	<-entered
+	capture := make(chan struct{})
+	installSnapshotCapture(t, l, capture)
 	quiescent := make(chan struct{})
 	go func() { l.WaitQuiescent(); close(quiescent) }()
-	waitSnapshotHeld(l)
+	<-capture
 	l.Submit(Record{json: `{"later":true}`})
 	close(release)
 	<-firstDone
@@ -226,9 +228,11 @@ func TestLoggerWaitQuiescentWaitsForUnlinkedSnapshotNode(t *testing.T) {
 	submitted := make(chan struct{})
 	go func() { l.Submit(Record{json: `{"joined":true}`}); close(submitted) }()
 	<-entered
+	capture := make(chan struct{})
+	installSnapshotCapture(t, l, capture)
 	quiescent := make(chan struct{})
 	go func() { l.WaitQuiescent(); close(quiescent) }()
-	waitSnapshotHeld(l)
+	<-capture
 	select {
 	case <-quiescent:
 		t.Fatal("quiescent before snapshot node linked")
@@ -254,9 +258,11 @@ func TestLoggerWaitQuiescentExcludesPostSnapshotUnlinkedNode(t *testing.T) {
 	l := NewLogger(clock, m, sink)
 	l.Submit(Record{json: `{"first":true}`})
 	<-sink.started
+	capture := make(chan struct{})
+	installSnapshotCapture(t, l, capture)
 	quiescent := make(chan struct{})
 	go func() { l.WaitQuiescent(); close(quiescent) }()
-	waitSnapshotHeld(l)
+	<-capture
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
 	installJoinPause(t, l, entered, release)
@@ -282,14 +288,6 @@ func TestLoggerSourceHasNoBusyTailSpin(t *testing.T) {
 	s := string(b)
 	if strings.Contains(s, "runtime.Gosched") {
 		t.Fatal("busy tail spin")
-	}
-}
-
-func waitSnapshotHeld(l *Logger) {
-	state := snapshotState(l)
-	for state.mu.TryLock() {
-		state.mu.Unlock()
-		runtime.Gosched()
 	}
 }
 

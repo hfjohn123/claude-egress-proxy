@@ -20,6 +20,7 @@ type loggerSnapshotState struct {
 	mu        sync.Mutex
 	cursor    *admissionNode
 	quiescent chan struct{}
+	capture   chan<- struct{}
 }
 
 type ticketPause struct {
@@ -59,6 +60,17 @@ func installJoinPause(t *testing.T, l *Logger, entered chan<- struct{}, release 
 	if _, loaded := loggerJoinPauses.LoadOrStore(l, &joinPause{entered: entered, release: release}); loaded {
 		t.Fatal("join pause unavailable")
 	}
+}
+
+func installSnapshotCapture(t *testing.T, l *Logger, capture chan<- struct{}) {
+	t.Helper()
+	state := snapshotState(l)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.capture != nil {
+		t.Fatal("snapshot capture unavailable")
+	}
+	state.capture = capture
 }
 
 func (l *Logger) Submit(record Record) {

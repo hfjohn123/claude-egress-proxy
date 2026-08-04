@@ -8,6 +8,10 @@ func (l *Logger) WaitQuiescent() {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	targetNode := state.tail.Load()
+	if capture := state.capture; capture != nil {
+		state.capture = nil
+		capture <- struct{}{}
+	}
 	node := state.cursor
 	target := l.terminal.Load()
 	for node != targetNode {

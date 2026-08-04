@@ -114,3 +114,14 @@ unlinked nodes cannot extend the snapshot. Ordinary `Submit` is now a separate
 build-selected implementation with fixed storage, no lock, no retry loop, no
 tracking allocation, and no test-control symbol. Deterministic tests cover an
 unlinked old node and an unlinked post-snapshot node.
+
+## Review fix round 5
+
+RED: the exclusion tests inferred tail capture from snapshot-mutex ownership,
+but the wait goroutine could own the mutex before executing `tail.Load`; a later
+submission could then enter the snapshot and hang the oracle.
+
+GREEN: tagged state now offers a one-shot capture handshake. `WaitQuiescent`
+signals it immediately after loading the fixed tail, while still holding the
+snapshot mutex. Exclusion tests wait for that exact event before appending later
+work, eliminating the scheduler race without sleeps or production seams.
