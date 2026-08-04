@@ -181,3 +181,11 @@ undefined.
   `7842bc7..3831767`: clean; no production defect masked.
 - Windows race testing remains unavailable on this host because CGO is disabled
   by default and no `gcc` compiler is installed.
+
+## 2026-08-04 native Linux closure
+
+The full repository and full `cep_testcontrol` suites now compile and execute
+natively in Ubuntu 24.04 WSL2. The previously blocked telemetry source-path
+tests pass because compilation and execution both use Linux paths. Ordinary and
+tagged full-repository race suites pass with GCC/CGO. Windows race availability
+is unchanged and remains a separate host-toolchain issue.
