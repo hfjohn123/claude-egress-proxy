@@ -1,7 +1,9 @@
 package telemetry
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,5 +25,41 @@ func TestSchemaHasClosedSurface(t *testing.T) {
 	}
 	if got := strings.Count(s, "id: silence_"); got != 12 {
 		t.Fatalf("silence cases = %d, want 12", got)
+	}
+}
+
+// This fails if telemetrygen stops treating both checked-in artifacts as
+// manifest renderings (rather than only checking a convenient subset).
+func TestGeneratorCheckRejectsMissingAndDriftedOwnedOutput(t *testing.T) {
+	root := filepath.Join("..", "..")
+	for _, path := range []string{"internal/telemetry/generated.go", "docs/reference/telemetry.md"} {
+		full := filepath.Join(root, path)
+		original, err := os.ReadFile(full)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.WriteFile(full, original, 0644) })
+		if err := os.WriteFile(full, append(original, '\n'), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("go", "run", "./internal/tools/telemetrygen", "-check")
+		cmd.Dir = root
+		if output, err := cmd.CombinedOutput(); err == nil || bytes.Contains(output, []byte("panic")) {
+			t.Fatalf("check accepted drift in %s: %v %s", path, err, output)
+		}
+		if err := os.WriteFile(full, original, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(full); err != nil {
+			t.Fatal(err)
+		}
+		cmd = exec.Command("go", "run", "./internal/tools/telemetrygen", "-check")
+		cmd.Dir = root
+		if output, err := cmd.CombinedOutput(); err == nil || bytes.Contains(output, []byte("panic")) {
+			t.Fatalf("check accepted missing %s: %v %s", path, err, output)
+		}
+		if err := os.WriteFile(full, original, 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

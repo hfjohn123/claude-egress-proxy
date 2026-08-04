@@ -4,14 +4,119 @@ package telemetry
 
 const schemaVersion = "v1"
 
-// EmissionCase is a manifest-owned closed section-11 case.
-type EmissionCase struct{ ID, PrimaryEmitter, Emission string }
+type MetricDefinition struct {
+	Name, Type, Help string
+	Labels, Values   []string
+	Buckets          []float64
+}
 
+var MetricDefinitions = []MetricDefinition{
+	{Name: "claude_proxy_tls_handshakes_total", Type: "counter", Help: "Total outer TLS handshakes by terminal result.", Labels: []string{"result"}, Values: []string{"success", "rate_limited", "timeout", "tls_error"}},
+	{Name: "claude_proxy_authentication_total", Type: "counter", Help: "Total proxy authentication outcomes by terminal result.", Labels: []string{"result"}, Values: []string{"challenge", "valid", "invalid", "throttled", "map_capacity", "store_unavailable"}},
+	{Name: "claude_proxy_connect_total", Type: "counter", Help: "Total CONNECT setup outcomes by terminal result.", Labels: []string{"result"}, Values: []string{"established", "malformed_request", "port_denied", "hostname_denied", "address_denied", "dns_failed", "dial_failed", "setup_timeout", "credential_store_unavailable", "source_bind_unavailable", "self_address_state_unavailable", "global_capacity", "device_capacity", "draining", "credential_changed", "client_disconnected", "internal_error"}},
+	{Name: "claude_proxy_tunnel_closes_total", Type: "counter", Help: "Total established tunnel closes by terminal result.", Labels: []string{"result"}, Values: []string{"clean", "io_error", "idle_timeout", "absolute_lifetime", "credential_revoked", "shutdown_deadline"}},
+	{Name: "claude_proxy_pac_total", Type: "counter", Help: "Total PAC endpoint outcomes by terminal result.", Labels: []string{"result"}, Values: []string{"served", "disabled", "not_found", "prefix_rate_limited", "global_rate_limited", "map_capacity", "capacity"}},
+	{Name: "claude_proxy_limiter_events_total", Type: "counter", Help: "Total limiter events by limiter and event.", Labels: []string{"limiter", "event"}, Values: []string{"tls_handshake", "authentication", "pac", "allowed", "throttled", "entry_expired", "map_full", "saturation_overflow"}},
+	{Name: "claude_proxy_reload_total", Type: "counter", Help: "Total runtime reload attempts by kind and result.", Labels: []string{"kind", "result"}, Values: []string{"credential", "certificate", "public_self", "source_bind", "acme", "success", "failure", "recovered"}},
+	{Name: "claude_proxy_log_records_total", Type: "counter", Help: "Total application log records by delivery result.", Labels: []string{"result"}, Values: []string{"written", "dropped_queue_full", "dropped_sink_failed", "dropped_shutdown_deadline"}},
+	{Name: "claude_proxy_bytes_total", Type: "counter", Help: "Total opaque tunnel bytes by direction.", Labels: []string{"direction"}, Values: []string{"client_to_origin", "origin_to_client"}},
+	{Name: "claude_proxy_limiter_entries", Type: "gauge", Help: "Current tracked limiter entries by limiter.", Labels: []string{"limiter"}, Values: []string{"tls_handshake", "authentication", "pac"}},
+	{Name: "claude_proxy_pre_auth_connections", Type: "gauge", Help: "Current admitted pre-authentication connections.", Labels: []string{}, Values: []string{}},
+	{Name: "claude_proxy_pending_setup_reservations", Type: "gauge", Help: "Current authenticated pending setup reservations.", Labels: []string{}, Values: []string{}},
+	{Name: "claude_proxy_active_tunnels", Type: "gauge", Help: "Current established tunnels.", Labels: []string{}, Values: []string{}},
+	{Name: "claude_proxy_credential_generation", Type: "gauge", Help: "Current installed credential generation, or zero when unavailable.", Labels: []string{}, Values: []string{}},
+	{Name: "claude_proxy_certificate_expiry_seconds", Type: "gauge", Help: "Seconds until the active certificate expires, floored at zero.", Labels: []string{}, Values: []string{}},
+	{Name: "claude_proxy_setup_duration_seconds", Type: "histogram", Help: "CONNECT setup duration in seconds by outcome.", Labels: []string{"outcome"}, Values: []string{"success", "failure"}, Buckets: []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15}},
+	{Name: "claude_proxy_tunnel_duration_seconds", Type: "histogram", Help: "Established tunnel duration in seconds by outcome.", Labels: []string{"outcome"}, Values: []string{"clean", "error", "revoked", "idle_timeout", "lifetime_timeout", "shutdown"}, Buckets: []float64{1, 5, 30, 60, 300, 900, 1800, 3600, 21600, 86400, 604800}},
+}
+
+type EmissionCase struct{ ID, PrimaryEmitter, Emission string }
+type RecordSchema struct {
+	Base, Sensitive []string
+	MaxBytes        int
+}
+
+var GeneratedRecordSchema = RecordSchema{Base: []string{"timestamp:string:rfc3339nano_utc", "level:string:fixed", "event:string:closed", "reason:string:closed"}, Sensitive: []string{"destination_hostname:string:1..253", "device_identifier:string:1..64", "source_prefix:string:ipv4_24_or_ipv6_64", "duration_ms:uint64", "bytes_client_to_origin:uint64", "bytes_origin_to_client:uint64"}, MaxBytes: 2047}
+var ValidLimiterPairs = map[string]bool{
+	"tls_handshake/allowed":             true,
+	"tls_handshake/throttled":           true,
+	"tls_handshake/entry_expired":       true,
+	"tls_handshake/saturation_overflow": true,
+	"authentication/allowed":            true,
+	"authentication/throttled":          true,
+	"authentication/entry_expired":      true,
+	"authentication/map_full":           true,
+	"pac/allowed":                       true,
+	"pac/throttled":                     true,
+	"pac/entry_expired":                 true,
+	"pac/map_full":                      true,
+}
 var MatrixCases = []EmissionCase{
-	{"matrix_01_production_mapped_admission", "admission", "limiter tls_handshake/allowed"}, {"matrix_02_production_overflow_admission", "admission", "limiter tls_handshake/saturation_overflow"}, {"matrix_03_production_admission_denied", "admission", "TLS rate_limited"}, {"matrix_04_loopback_mapped_or_overflow_admission", "admission", "limiter only"}, {"matrix_05_loopback_admission_denied", "admission", "limiter throttled only"}, {"matrix_06_acme_challenge_handshake_complete", "tls", "TLS success"}, {"matrix_07_no_certificate_nonchallenge_rejected", "tls", "TLS tls_error"}, {"matrix_08_other_production_tls_terminal", "tls", "TLS terminal"}, {"matrix_09_pre_handler_framework_rejection", "framework", "silence"}, {"matrix_10_public_structural_rejection", "public_adapter", "connect malformed_request"}, {"matrix_11_public_version_or_method_rejection", "public_adapter", "silence"}, {"matrix_12_pac_disabled_or_not_found", "pac", "PAC terminal"}, {"matrix_13_pac_rate_denial", "pac", "PAC plus limiter"}, {"matrix_14_pac_map_capacity_denial", "pac", "PAC plus limiter"}, {"matrix_15_pac_work_capacity_denial", "pac", "PAC capacity"}, {"matrix_16_pac_admission_success", "pac", "PAC served plus limiter"}, {"matrix_17_store_unavailable_before_authentication", "authentication", "auth store_unavailable"}, {"matrix_18_authorization_absent", "authentication", "auth challenge"}, {"matrix_19_invalid_authentication_admitted", "authentication", "auth invalid plus limiter"}, {"matrix_20_invalid_authentication_throttled", "authentication", "auth throttled plus limiter"}, {"matrix_21_invalid_unknown_prefix_map_full", "authentication", "auth map_capacity plus limiter"}, {"matrix_22_valid_credential", "authentication", "auth valid"}, {"matrix_23_post_valid_malformed_authority", "setup", "connect malformed_request plus setup failure"}, {"matrix_24_other_post_valid_setup_failure", "setup", "connect plus setup failure"}, {"matrix_25_pending_to_established", "setup", "connect established plus setup success"}, {"matrix_26_post_commit_handoff_failure", "tunnel", "io_error close"}, {"matrix_27_established_tunnel_terminal", "tunnel", "close duration bytes record"}, {"matrix_28_admin_request_silence", "admin", "silence"}, {"matrix_29_limiter_entry_expired", "limiter_maintenance", "limiter entry_expired"}, {"matrix_30_reload_success", "reload", "reload success"}, {"matrix_31_reload_failure", "reload", "reload failure"}, {"matrix_32_reload_recovered", "reload", "reload recovered"}, {"matrix_33_service_state_transition", "service", "service_state record"},
+	{ID: "matrix_01_production_mapped_admission", PrimaryEmitter: "admission", Emission: ""},
+	{ID: "matrix_02_production_overflow_admission", PrimaryEmitter: "admission", Emission: ""},
+	{ID: "matrix_03_production_admission_denied", PrimaryEmitter: "admission", Emission: ""},
+	{ID: "matrix_04_loopback_mapped_or_overflow_admission", PrimaryEmitter: "admission", Emission: ""},
+	{ID: "matrix_05_loopback_admission_denied", PrimaryEmitter: "admission", Emission: ""},
+	{ID: "matrix_06_acme_challenge_handshake_complete", PrimaryEmitter: "tls", Emission: ""},
+	{ID: "matrix_07_no_certificate_nonchallenge_rejected", PrimaryEmitter: "tls", Emission: ""},
+	{ID: "matrix_08_other_production_tls_terminal", PrimaryEmitter: "tls", Emission: ""},
+	{ID: "matrix_09_pre_handler_framework_rejection", PrimaryEmitter: "framework", Emission: ""},
+	{ID: "matrix_10_public_structural_rejection", PrimaryEmitter: "public_adapter", Emission: ""},
+	{ID: "matrix_11_public_version_or_method_rejection", PrimaryEmitter: "public_adapter", Emission: ""},
+	{ID: "matrix_12_pac_disabled_or_not_found", PrimaryEmitter: "pac", Emission: ""},
+	{ID: "matrix_13_pac_rate_denial", PrimaryEmitter: "pac", Emission: ""},
+	{ID: "matrix_14_pac_map_capacity_denial", PrimaryEmitter: "pac", Emission: ""},
+	{ID: "matrix_15_pac_work_capacity_denial", PrimaryEmitter: "pac", Emission: ""},
+	{ID: "matrix_16_pac_admission_success", PrimaryEmitter: "pac", Emission: ""},
+	{ID: "matrix_17_store_unavailable_before_authentication", PrimaryEmitter: "authentication", Emission: ""},
+	{ID: "matrix_18_authorization_absent", PrimaryEmitter: "authentication", Emission: ""},
+	{ID: "matrix_19_invalid_authentication_admitted", PrimaryEmitter: "authentication", Emission: ""},
+	{ID: "matrix_20_invalid_authentication_throttled", PrimaryEmitter: "authentication", Emission: ""},
+	{ID: "matrix_21_invalid_unknown_prefix_map_full", PrimaryEmitter: "authentication", Emission: ""},
+	{ID: "matrix_22_valid_credential", PrimaryEmitter: "authentication", Emission: ""},
+	{ID: "matrix_23_post_valid_malformed_authority", PrimaryEmitter: "setup", Emission: ""},
+	{ID: "matrix_24_other_post_valid_setup_failure", PrimaryEmitter: "setup", Emission: ""},
+	{ID: "matrix_25_pending_to_established", PrimaryEmitter: "setup", Emission: ""},
+	{ID: "matrix_26_post_commit_handoff_failure", PrimaryEmitter: "tunnel", Emission: ""},
+	{ID: "matrix_27_established_tunnel_terminal", PrimaryEmitter: "tunnel", Emission: ""},
+	{ID: "matrix_28_admin_request_silence", PrimaryEmitter: "admin", Emission: ""},
+	{ID: "matrix_29_limiter_entry_expired", PrimaryEmitter: "limiter_maintenance", Emission: ""},
+	{ID: "matrix_30_reload_success", PrimaryEmitter: "reload", Emission: ""},
+	{ID: "matrix_31_reload_failure", PrimaryEmitter: "reload", Emission: ""},
+	{ID: "matrix_32_reload_recovered", PrimaryEmitter: "reload", Emission: ""},
+	{ID: "matrix_33_service_state_transition", PrimaryEmitter: "service", Emission: ""},
 }
 var SilenceCases = []EmissionCase{
-	{"silence_01_pre_handler_framework_rejection", "framework", "no application telemetry"}, {"silence_02_handler_version_or_method_rejection", "public_adapter", "no application telemetry"}, {"silence_03_acme_challenge_no_request_telemetry", "tls", "silence"}, {"silence_04_no_certificate_failure_no_request_telemetry", "tls", "silence"}, {"silence_05_admin_per_request", "admin", "silence"}, {"silence_06_pac_capacity_no_limiter", "pac", "no limiter"}, {"silence_07_auth_challenge_no_limiter", "authentication", "no limiter"}, {"silence_08_valid_credential_no_auth_limiter", "authentication", "no limiter"}, {"silence_09_unchanged_reload_poll", "reload", "silence"}, {"silence_10_reload_success_no_log", "reload", "no log"}, {"silence_11_repeated_reload_failure_no_repeat_log", "reload", "no log"}, {"silence_12_initial_safe_credential_absence_no_reload_log", "reload", "no log"},
+	{ID: "silence_01_pre_handler_framework_rejection", PrimaryEmitter: "framework", Emission: ""},
+	{ID: "silence_02_handler_version_or_method_rejection", PrimaryEmitter: "public_adapter", Emission: ""},
+	{ID: "silence_03_acme_challenge_no_request_telemetry", PrimaryEmitter: "tls", Emission: ""},
+	{ID: "silence_04_no_certificate_failure_no_request_telemetry", PrimaryEmitter: "tls", Emission: ""},
+	{ID: "silence_05_admin_per_request", PrimaryEmitter: "admin", Emission: ""},
+	{ID: "silence_06_pac_capacity_no_limiter", PrimaryEmitter: "pac", Emission: ""},
+	{ID: "silence_07_auth_challenge_no_limiter", PrimaryEmitter: "authentication", Emission: ""},
+	{ID: "silence_08_valid_credential_no_auth_limiter", PrimaryEmitter: "authentication", Emission: ""},
+	{ID: "silence_09_unchanged_reload_poll", PrimaryEmitter: "reload", Emission: ""},
+	{ID: "silence_10_reload_success_no_log", PrimaryEmitter: "reload", Emission: ""},
+	{ID: "silence_11_repeated_reload_failure_no_repeat_log", PrimaryEmitter: "reload", Emission: ""},
+	{ID: "silence_12_initial_safe_credential_absence_no_reload_log", PrimaryEmitter: "reload", Emission: ""},
 }
-var ReloadCases = []EmissionCase{{"reload_01_unchanged_poll", "reload", "silence"}, {"reload_02_first_failure", "reload", "failure metric and log"}, {"reload_03_later_changed_failure", "reload", "failure metric"}, {"reload_04_first_success_after_failure", "reload", "recovered metric and log"}, {"reload_05_initial_safe_absence", "reload", "silence"}, {"reload_06_first_publication_after_absence", "reload", "success metric"}, {"reload_07_scheduled_public_self_source_bind_acme_attempt", "reload", "attempt"}}
-var LifecycleCases = []EmissionCase{{"lifecycle_01_initial_startup", "service", "ordered startup"}, {"lifecycle_02_runtime_credential_loss", "service", "ordered loss"}, {"lifecycle_03_runtime_credential_recovery", "service", "ordered recovery"}, {"lifecycle_04_initial_absence_first_publication", "service", "ordered publication"}, {"lifecycle_05_drain", "service", "draining then not_ready"}, {"lifecycle_06_orderly_stop", "service", "stopped"}, {"lifecycle_07_fatal_prestart", "service", "startup_failed"}, {"lifecycle_08_noncredential_failure_readiness", "service", "failure before not_ready"}, {"lifecycle_09_noncredential_recovery_readiness", "service", "recovery before ready"}}
+var ReloadCases = []EmissionCase{
+	{ID: "reload_01_unchanged_poll", PrimaryEmitter: "reload"},
+	{ID: "reload_02_first_failure", PrimaryEmitter: "reload"},
+	{ID: "reload_03_later_changed_failure", PrimaryEmitter: "reload"},
+	{ID: "reload_04_first_success_after_failure", PrimaryEmitter: "reload"},
+	{ID: "reload_05_initial_safe_absence", PrimaryEmitter: "reload"},
+	{ID: "reload_06_first_publication_after_absence", PrimaryEmitter: "reload"},
+	{ID: "reload_07_scheduled_public_self_source_bind_acme_attempt", PrimaryEmitter: "reload"},
+}
+var LifecycleCases = []EmissionCase{
+	{ID: "lifecycle_01_initial_startup", PrimaryEmitter: "service"},
+	{ID: "lifecycle_02_runtime_credential_loss", PrimaryEmitter: "service"},
+	{ID: "lifecycle_03_runtime_credential_recovery", PrimaryEmitter: "service"},
+	{ID: "lifecycle_04_initial_absence_first_publication", PrimaryEmitter: "service"},
+	{ID: "lifecycle_05_drain", PrimaryEmitter: "service"},
+	{ID: "lifecycle_06_orderly_stop", PrimaryEmitter: "service"},
+	{ID: "lifecycle_07_fatal_prestart", PrimaryEmitter: "service"},
+	{ID: "lifecycle_08_noncredential_failure_readiness", PrimaryEmitter: "service"},
+	{ID: "lifecycle_09_noncredential_recovery_readiness", PrimaryEmitter: "service"},
+}

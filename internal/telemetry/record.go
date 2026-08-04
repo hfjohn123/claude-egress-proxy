@@ -94,7 +94,7 @@ func build(at time.Time, level, event, reason string, s *SensitiveMetadata) (Rec
 		b.WriteString(strconv.FormatUint(s.Bytes.OriginToClient, 10))
 	}
 	b.WriteByte('}')
-	if b.Len() > 2047 || strings.ContainsAny(b.String(), "\r\n") {
+	if b.Len() > GeneratedRecordSchema.MaxBytes || strings.ContainsAny(b.String(), "\r\n") {
 		return Record{}, ErrInvalidRecord
 	}
 	return Record{json: b.String()}, nil

@@ -30,16 +30,16 @@ func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, 
 	}
 	m := &Metrics{registry: prometheus.NewPedanticRegistry(), clock: clock, certificateNotAfter: cert}
 	m.state.Store(&StateSnapshot{})
-	m.tls = cv("claude_proxy_tls_handshakes_total", "Total outer TLS handshakes by terminal result.", []string{"result"})
-	m.auth = cv("claude_proxy_authentication_total", "Total proxy authentication outcomes by terminal result.", []string{"result"})
-	m.connect = cv("claude_proxy_connect_total", "Total CONNECT setup outcomes by terminal result.", []string{"result"})
-	m.pac = cv("claude_proxy_pac_total", "Total PAC endpoint outcomes by terminal result.", []string{"result"})
-	m.limiter = cv("claude_proxy_limiter_events_total", "Total limiter events by limiter and event.", []string{"limiter", "event"})
-	m.reload = cv("claude_proxy_reload_total", "Total runtime reload attempts by kind and result.", []string{"kind", "result"})
-	m.delivery = cv("claude_proxy_log_records_total", "Total application log records by delivery result.", []string{"result"})
-	m.bytes = cv("claude_proxy_bytes_total", "Total opaque tunnel bytes by direction.", []string{"direction"})
-	m.setup = hv("claude_proxy_setup_duration_seconds", "CONNECT setup duration in seconds by outcome.", []string{"outcome"}, []float64{.01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 15})
-	m.tunnel = hv("claude_proxy_tunnel_duration_seconds", "Established tunnel duration in seconds by outcome.", []string{"outcome"}, []float64{1, 5, 30, 60, 300, 900, 1800, 3600, 21600, 86400, 604800})
+	m.tls = cv("claude_proxy_tls_handshakes_total")
+	m.auth = cv("claude_proxy_authentication_total")
+	m.connect = cv("claude_proxy_connect_total")
+	m.pac = cv("claude_proxy_pac_total")
+	m.limiter = cv("claude_proxy_limiter_events_total")
+	m.reload = cv("claude_proxy_reload_total")
+	m.delivery = cv("claude_proxy_log_records_total")
+	m.bytes = cv("claude_proxy_bytes_total")
+	m.setup = hv("claude_proxy_setup_duration_seconds")
+	m.tunnel = hv("claude_proxy_tunnel_duration_seconds")
 	for _, c := range []prometheus.Collector{m.tls, m.auth, m.connect, m.pac, m.limiter, m.reload, m.delivery, m.bytes, m.setup, m.tunnel} {
 		if err := m.registry.Register(c); err != nil {
 			return nil, ErrInvalidMetrics
@@ -76,9 +76,7 @@ func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, 
 	}
 	for _, l := range contract.AllLimiters() {
 		for _, e := range contract.AllLimiterEvents() {
-			x, _ := contract.ParseLimiter(l)
-			y, _ := contract.ParseLimiterEvent(e)
-			if contract.ValidLimiterPair(x, y) {
+			if ValidLimiterPairs[l+"/"+e] {
 				m.limiter.WithLabelValues(l, e)
 			}
 		}
@@ -115,11 +113,21 @@ func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, 
 	}
 	return m, nil
 }
-func cv(n, h string, l []string) *prometheus.CounterVec {
-	return prometheus.NewCounterVec(prometheus.CounterOpts{Name: n, Help: h}, l)
+func metricDefinition(name string) MetricDefinition {
+	for _, definition := range MetricDefinitions {
+		if definition.Name == name {
+			return definition
+		}
+	}
+	panic("telemetry: missing generated metric definition")
 }
-func hv(n, h string, l []string, b []float64) *prometheus.HistogramVec {
-	return prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: n, Help: h, Buckets: b}, l)
+func cv(name string) *prometheus.CounterVec {
+	d := metricDefinition(name)
+	return prometheus.NewCounterVec(prometheus.CounterOpts{Name: d.Name, Help: d.Help}, d.Labels)
+}
+func hv(name string) *prometheus.HistogramVec {
+	d := metricDefinition(name)
+	return prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: d.Name, Help: d.Help, Buckets: d.Buckets}, d.Labels)
 }
 func (m *Metrics) Gatherer() prometheus.Gatherer { return m.registry }
 func (m *Metrics) PublishState(s StateSnapshot) {
@@ -139,7 +147,7 @@ func (m *Metrics) IncPAC(v contract.PACResult) { m.pac.WithLabelValues(validPAC(
 func (m *Metrics) IncLimiter(l contract.Limiter, e contract.LimiterEvent) {
 	a := validLimiter(l)
 	b := validEvent(e)
-	if !contract.ValidLimiterPair(l, e) {
+	if !ValidLimiterPairs[a+"/"+b] {
 		panic(invalidClosed)
 	}
 	m.limiter.WithLabelValues(a, b).Inc()
