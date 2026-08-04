@@ -41,7 +41,7 @@ func NewLogger(clock timebase.Clock, metrics *Metrics, sink Sink) *Logger {
 		panic(loggerInvalid)
 	}
 	l := &Logger{clock: clock, metrics: metrics, sink: sink, active: -1, accepting: sink != nil,
-		notify: make(chan struct{}, 1), done: make(chan struct{}), quiescent: make(chan struct{})}
+		notify: make(chan struct{}, 1), done: make(chan struct{}), quiescent: make(chan struct{}), callDone: make(chan error, 1)}
 	for i := range l.free {
 		l.free[i] = i
 	}
@@ -122,11 +122,11 @@ func (l *Logger) supervise() {
 			l.mu.Unlock()
 			return
 		}
-		callDone, callTimer, shutdownTimer := l.callDone, l.callTimer, l.shutdownTimer
+		callDone, callTimer, shutdownTimer, active := l.callDone, l.callTimer, l.shutdownTimer, l.active
 		l.mu.Unlock()
 		var callC <-chan error
 		var timerC, shutdownC <-chan time.Time
-		if callDone != nil {
+		if active >= 0 {
 			callC = callDone
 			timerC = callTimer.C()
 		}
@@ -172,7 +172,6 @@ func (l *Logger) startLocked() {
 	l.active = i
 	l.callDeadline = l.clock.Now().Add(250 * time.Millisecond)
 	l.callTimer = l.clock.NewTimer(250 * time.Millisecond)
-	l.callDone = make(chan error, 1)
 	bytes := l.slots[i][:l.lens[i]]
 	go func(done chan<- error, json []byte) { done <- l.sink.WriteRecord(json) }(l.callDone, bytes)
 }
@@ -182,7 +181,6 @@ func (l *Logger) completeActiveLocked(result contract.DeliveryResult) {
 	l.recordLocked(result)
 	i := l.active
 	l.active = -1
-	l.callDone = nil
 	l.callTimer = nil
 	l.free[l.freeTail%256] = i
 	l.freeTail++
@@ -191,18 +189,20 @@ func (l *Logger) completeActiveLocked(result contract.DeliveryResult) {
 func (l *Logger) failLocked() {
 	l.accepting = false
 	l.failed = true
-	l.frozen = delivery("dropped_sink_failed")
+	failure := delivery("dropped_sink_failed")
+	if !l.shutting {
+		l.frozen = failure
+	}
 	if l.active >= 0 {
 		l.callTimer.Stop()
-		l.recordLocked(l.frozen)
+		l.recordLocked(failure)
 		l.active = -1
-		l.callDone = nil
 		l.callTimer = nil
 	}
 	for l.queued > 0 {
 		l.head = (l.head + 1) % 256
 		l.queued--
-		l.recordLocked(l.frozen)
+		l.recordLocked(failure)
 	}
 	l.closeLocked()
 }
@@ -213,7 +213,6 @@ func (l *Logger) shutdownExpireLocked() {
 		l.callTimer.Stop()
 		l.recordLocked(l.frozen)
 		l.active = -1
-		l.callDone = nil
 		l.callTimer = nil
 	}
 	for l.queued > 0 {
@@ -226,6 +225,9 @@ func (l *Logger) shutdownExpireLocked() {
 func (l *Logger) closeLocked() {
 	if !l.closed {
 		l.closed = true
+		if l.shutdownTimer != nil {
+			l.shutdownTimer.Stop()
+		}
 		if l.sink != nil {
 			_ = l.sink.Close()
 		}
