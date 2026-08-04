@@ -63,47 +63,65 @@ func TestServerAbortsUnownedConnectionWithoutCallingHandler(t *testing.T) {
 
 func TestServerOwnedLiteralParserMatrix(t *testing.T) {
 	tests := []struct {
-		name, raw string
-		reach     bool
-		decision  Decision
+		name, raw      string
+		reach          bool
+		decision       Decision
+		wantRequestURI string
+		wantTarget     TargetForm
 	}{
-		{"http10", "GET / HTTP/1.0\r\n\r\n", true, DecisionHTTPVersionNotSupported},
-		{"other minor", "GET / HTTP/1.2\r\nHost: x\r\n\r\n", true, DecisionHTTPVersionNotSupported},
-		{"origin", "GET /x HTTP/1.1\r\nHost: x\r\n\r\n", true, DecisionAllow},
-		{"authority", "CONNECT x:443 HTTP/1.1\r\nHost: ignored\r\n\r\n", true, DecisionAllow},
-		{"absolute", "GET http://x/a HTTP/1.1\r\nHost: x\r\n\r\n", true, DecisionAllow},
-		{"asterisk", "OPTIONS * HTTP/1.1\r\nHost: x\r\n\r\n", true, DecisionAllow},
-		{"content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", true, DecisionBadRequest},
-		{"expect", "GET / HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n\r\n", true, DecisionBadRequest},
-		{"upgrade", "GET / HTTP/1.1\r\nHost: x\r\nConnection: upgrade\r\nUpgrade: x\r\n\r\n", true, DecisionBadRequest},
-		{"pri", "PRI * HTTP/2.0\r\n\r\n", true, DecisionHTTPVersionNotSupported},
-		{"absent host", "GET / HTTP/1.1\r\n\r\n", false, 0},
-		{"conflicting host", "GET http://a/x HTTP/1.1\r\nHost: b\r\n\r\n", true, DecisionAllow},
-		{"obsolete folding", "GET / HTTP/1.1\r\nHost: x\r\nX-Fold: a\r\n b\r\n\r\n", true, DecisionAllow},
-		{"transfer coding", "GET / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", true, DecisionBadRequest},
-		{"equal content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n", true, DecisionBadRequest},
-		{"cl te", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", true, DecisionBadRequest},
-		{"conflicting content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\n", false, 0},
-		{"duplicate host", "GET / HTTP/1.1\r\nHost: x\r\nHost: y\r\n\r\n", false, 0},
-		{"malformed host", "GET / HTTP/1.1\r\nHost: x y\r\n\r\n", false, 0},
+		{"http10", "GET / HTTP/1.0\r\n\r\n", true, DecisionHTTPVersionNotSupported, "", 0},
+		{"other minor", "GET / HTTP/1.2\r\nHost: x\r\n\r\n", true, DecisionHTTPVersionNotSupported, "", 0},
+		{"origin", "GET /x HTTP/1.1\r\nHost: x\r\n\r\n", true, DecisionAllow, "", 0},
+		{"authority absent host", "CONNECT x:443 HTTP/1.1\r\n\r\n", true, DecisionAllow, "x:443", TargetAuthority},
+		{"authority conflicting host", "CONNECT x:443 HTTP/1.1\r\nHost: other.example\r\n\r\n", true, DecisionAllow, "x:443", TargetAuthority},
+		{"absolute", "GET http://x/a HTTP/1.1\r\nHost: x\r\n\r\n", true, DecisionAllow, "", 0},
+		{"asterisk", "OPTIONS * HTTP/1.1\r\nHost: x\r\n\r\n", true, DecisionAllow, "", 0},
+		{"content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"expect", "GET / HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"upgrade", "GET / HTTP/1.1\r\nHost: x\r\nConnection: upgrade\r\nUpgrade: x\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"pri", "PRI * HTTP/2.0\r\n\r\n", true, DecisionHTTPVersionNotSupported, "", 0},
+		{"absent host origin", "GET / HTTP/1.1\r\n\r\n", false, 0, "", 0},
+		{"obsolete folding", "GET / HTTP/1.1\r\nHost: x\r\nX-Fold: a\r\n b\r\n\r\n", true, DecisionAllow, "", 0},
+		{"transfer coding", "GET / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"equal content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"cl te", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"conflicting content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\n", false, 0, "", 0},
+		{"duplicate host", "GET / HTTP/1.1\r\nHost: x\r\nHost: y\r\n\r\n", false, 0, "", 0},
+		{"malformed host", "GET / HTTP/1.1\r\nHost: x y\r\n\r\n", false, 0, "", 0},
+		{"malformed non-host header", "GET / HTTP/1.1\r\nHost: x\r\nBad Header: value\r\n\r\n", false, 0, "", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var calls atomic.Int32
-			var got Decision
+			var calls, downstream atomic.Int32
+			var gotRequest Request
+			var gotDecision Decision
 			var observed OwnedConn
 			owner := serveOne(t, tt.raw, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
-				_, got = AdaptRequest(r)
+				if tt.wantRequestURI != "" {
+					r.Host = "poison.invalid:1"
+					r.URL.Host = "poison.invalid:1"
+				}
+				gotRequest, gotDecision = AdaptRequest(r)
 				o, _ := ConnectionOwner(r)
 				observed = o
+				if gotDecision == DecisionAllow {
+					downstream.Add(1)
+				}
 				w.Header().Set("Connection", "close")
 			}))
 			if (calls.Load() == 1) != tt.reach {
 				t.Fatalf("calls=%d reach=%v", calls.Load(), tt.reach)
 			}
-			if tt.reach && (got != tt.decision || observed != owner) {
-				t.Fatalf("decision=%v owner=%v exact=%v", got, observed, observed == owner)
+			if tt.reach && (gotDecision != tt.decision || observed != owner) {
+				t.Fatalf("decision=%v owner=%v exact=%v", gotDecision, observed, observed == owner)
+			}
+			if tt.wantRequestURI != "" && (gotRequest.RequestURI != tt.wantRequestURI || gotRequest.Target != tt.wantTarget) {
+				t.Fatalf("requestURI=%q target=%v; want %q, %v", gotRequest.RequestURI, gotRequest.Target, tt.wantRequestURI, tt.wantTarget)
+			}
+			wantDownstream := tt.reach && tt.decision == DecisionAllow
+			if (downstream.Load() == 1) != wantDownstream {
+				t.Fatalf("downstream=%d want=%v", downstream.Load(), wantDownstream)
 			}
 			if owner.releases != 1 {
 				t.Fatalf("releases=%d", owner.releases)
