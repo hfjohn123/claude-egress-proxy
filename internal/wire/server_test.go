@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -75,6 +76,14 @@ func TestServerOwnedLiteralParserMatrix(t *testing.T) {
 		{"content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", true, DecisionBadRequest},
 		{"expect", "GET / HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n\r\n", true, DecisionBadRequest},
 		{"upgrade", "GET / HTTP/1.1\r\nHost: x\r\nConnection: upgrade\r\nUpgrade: x\r\n\r\n", true, DecisionBadRequest},
+		{"pri", "PRI * HTTP/2.0\r\n\r\n", true, DecisionHTTPVersionNotSupported},
+		{"absent host", "GET / HTTP/1.1\r\n\r\n", false, 0},
+		{"conflicting host", "GET http://a/x HTTP/1.1\r\nHost: b\r\n\r\n", true, DecisionAllow},
+		{"obsolete folding", "GET / HTTP/1.1\r\nHost: x\r\nX-Fold: a\r\n b\r\n\r\n", true, DecisionAllow},
+		{"transfer coding", "GET / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", true, DecisionBadRequest},
+		{"equal content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n", true, DecisionBadRequest},
+		{"cl te", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", true, DecisionBadRequest},
+		{"conflicting content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\n", false, 0},
 		{"duplicate host", "GET / HTTP/1.1\r\nHost: x\r\nHost: y\r\n\r\n", false, 0},
 		{"malformed host", "GET / HTTP/1.1\r\nHost: x y\r\n\r\n", false, 0},
 	}
@@ -82,24 +91,51 @@ func TestServerOwnedLiteralParserMatrix(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var calls atomic.Int32
 			var got Decision
-			var same atomic.Bool
+			var observed OwnedConn
 			owner := serveOne(t, tt.raw, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
 				_, got = AdaptRequest(r)
-				o, ok := ConnectionOwner(r)
-				same.Store(ok && o != nil)
+				o, _ := ConnectionOwner(r)
+				observed = o
 				w.Header().Set("Connection", "close")
 			}))
 			if (calls.Load() == 1) != tt.reach {
 				t.Fatalf("calls=%d reach=%v", calls.Load(), tt.reach)
 			}
-			if tt.reach && (got != tt.decision || !same.Load()) {
-				t.Fatalf("decision=%v same=%v", got, same.Load())
+			if tt.reach && (got != tt.decision || observed != owner) {
+				t.Fatalf("decision=%v owner=%v exact=%v", got, observed, observed == owner)
 			}
 			if owner.releases != 1 {
 				t.Fatalf("releases=%d", owner.releases)
 			}
 		})
+	}
+}
+
+func TestServerClosesAfterOneRequestAndRejectsDuplicateProxyAuthorization(t *testing.T) {
+	raw := "GET /one HTTP/1.1\r\nHost: x\r\nProxy-Authorization: Basic a\r\nProxy-Authorization: Basic b\r\n\r\nGET /two HTTP/1.1\r\nHost: x\r\n\r\n"
+	var calls, downstream atomic.Int32
+	owner := serveOne(t, raw, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, decision := AdaptRequest(r)
+		credential, count := TakeAuthorization(r.Header, "Proxy-Authorization")
+		if decision == DecisionAllow && count <= 1 {
+			downstream.Add(1)
+		}
+		if count != 2 || credential != nil || len(r.Header.Values("Proxy-Authorization")) != 0 {
+			t.Fatalf("count=%d credential=%q header=%v", count, credential, r.Header)
+		}
+	}))
+	if calls.Load() != 1 || downstream.Load() != 0 || owner.releases != 1 {
+		t.Fatalf("calls=%d downstream=%d releases=%d", calls.Load(), downstream.Load(), owner.releases)
+	}
+}
+
+func TestServerFrameworkRejectsOversizedHeader(t *testing.T) {
+	var calls atomic.Int32
+	serveOne(t, "GET / HTTP/1.1\r\nHost: x\r\nX: "+strings.Repeat("a", 40<<10)+"\r\n\r\n", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	if calls.Load() != 0 {
+		t.Fatal("oversized header reached handler")
 	}
 }
 
@@ -119,11 +155,13 @@ func serveOne(t *testing.T, raw string, handler http.Handler) *trackedOwnedConn 
 	s := NewServer(handler)
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(listener) }()
-	if _, err := io.WriteString(client, raw); err != nil {
-		t.Fatal(err)
-	}
+	written := make(chan error, 1)
+	go func() { _, err := io.WriteString(client, raw); written <- err }()
 	_ = client.SetReadDeadline(time.Now().Add(time.Second))
 	_, _ = io.ReadAll(client)
+	if err := <-written; err != nil && !strings.Contains(err.Error(), "closed pipe") {
+		t.Fatal(err)
+	}
 	_ = client.Close()
 	<-done
 	return owner
