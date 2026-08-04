@@ -3,7 +3,7 @@
 package telemetry
 
 import (
-	"sync/atomic"
+	"sync"
 	"testing"
 )
 
@@ -12,18 +12,20 @@ type ticketPause struct {
 	release <-chan struct{}
 }
 
-var loggerPause atomic.Pointer[ticketPause]
+var loggerPauses sync.Map
 
-func installTicketPause(t *testing.T, entered chan<- struct{}, release <-chan struct{}) {
+func installTicketPause(t *testing.T, l *Logger, entered chan<- struct{}, release <-chan struct{}) {
 	t.Helper()
-	if !loggerPause.CompareAndSwap(nil, &ticketPause{entered: entered, release: release}) {
+	if _, loaded := loggerPauses.LoadOrStore(l, &ticketPause{entered: entered, release: release}); loaded {
 		t.Fatal("ticket pause unavailable")
 	}
 }
 
-func loggerTicketPause() {
-	if pause := loggerPause.Swap(nil); pause != nil {
+func (l *Logger) publishTicket(ticket uint64, b string, epoch *loggerEpoch) {
+	if value, ok := loggerPauses.LoadAndDelete(l); ok {
+		pause := value.(*ticketPause)
 		pause.entered <- struct{}{}
 		<-pause.release
 	}
+	l.publishTicketCore(ticket, b, epoch)
 }

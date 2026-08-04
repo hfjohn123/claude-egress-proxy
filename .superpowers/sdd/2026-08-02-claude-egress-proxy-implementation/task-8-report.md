@@ -60,3 +60,21 @@ The deterministic one-shot ticket pause moved to `cep_testcontrol` files, with
 an inlineable no-op ordinary counterpart; ordinary `Logger` has no hook field
 or hook type/branch. Source checks now reject the former hook names from
 ordinary logger code.
+
+## Review fix round 2
+
+RED: the first epoch implementation still used a global tail after draining
+its old admission side, so a later submission could extend a prior
+`WaitQuiescent` target. It also used unbounded producer CAS loops, and the
+ordinary build retained a named pause seam.
+
+GREEN: each admission epoch now owns its active count, closure bit, and maximum
+accepted ticket target. Tagged quiescence swaps epochs, closes/waits the old
+epoch, then waits only its recorded target. `Submit` uses bounded epoch joining
+and leaves with a single atomic decrement. Shutdown stores its rejecting gate
+while holding the state lock, then installs its budget before releasing that
+lock, so the supervisor cannot observe partial state. Publication is routed
+through build-specific methods: ordinary code only invokes the core publisher;
+the tagged variant supplies logger-scoped deterministic pausing. The ordinary
+source audit now enumerates all files selected by an ordinary `go/build` and
+rejects test-control, pause, and hook seams.

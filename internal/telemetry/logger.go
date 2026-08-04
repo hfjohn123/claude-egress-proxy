@@ -36,7 +36,7 @@ type Logger struct {
 
 	gate        atomic.Uint32
 	publication atomic.Uint32
-	admission   atomic.Uint64
+	epoch       atomic.Pointer[loggerEpoch]
 	tail        atomic.Uint64
 	terminal    atomic.Uint64
 
@@ -48,11 +48,18 @@ type Logger struct {
 	closed           bool
 }
 
+type loggerEpoch struct {
+	active atomic.Uint32
+	target atomic.Uint64
+	closed atomic.Bool
+}
+
 func NewLogger(clock timebase.Clock, metrics *Metrics, sink Sink) *Logger {
 	if clock == nil || metrics == nil {
 		panic(loggerInvalid)
 	}
 	l := &Logger{clock: clock, metrics: metrics, sink: sink, capacity: make(chan struct{}, 256), notify: make(chan struct{}, 1), progress: make(chan struct{}, 1), quiescent: make(chan struct{}, 1), callDone: make(chan error, 1), done: make(chan struct{})}
+	l.epoch.Store(&loggerEpoch{})
 	if sink == nil {
 		l.gate.Store(loggerFailed)
 		close(l.done)
@@ -87,12 +94,7 @@ func (l *Logger) Submit(record Record) {
 		return
 	}
 	ticket := l.tail.Add(1) - 1
-	loggerTicketPause()
-	i := ticket % 256
-	copy(l.slots[i][:], b)
-	l.lens[i].Store(uint32(len(b)))
-	l.published[i].Store(ticket + 1)
-	l.signal(l.notify)
+	l.publishTicket(ticket, b, epoch)
 }
 
 func (l *Logger) Shutdown(ctx context.Context) {
@@ -101,10 +103,10 @@ func (l *Logger) Shutdown(ctx context.Context) {
 	}
 	l.stateMu.Lock()
 	if l.gate.Load() == loggerAccepting {
+		l.gate.Store(loggerShutdown)
 		l.shutdown = true
 		l.shutdownDeadline = l.clock.Now().Add(time.Second)
 		l.shutdownTimer = l.clock.NewTimer(time.Second)
-		l.gate.Store(loggerShutdown)
 		l.stateMu.Unlock()
 		l.signal(l.notify)
 	} else {
@@ -233,34 +235,33 @@ func (l *Logger) failGate() {
 	}
 	l.stateMu.Unlock()
 }
-func (l *Logger) joinEpoch() uint64 {
-	for {
-		state := l.admission.Load()
-		slot := state & 1
-		shift := uint(1)
-		if slot != 0 {
-			shift = 32
-		}
-		if (state>>shift)&0x7fffffff == 0x7fffffff {
-			panic(loggerInvalid)
-		}
-		if l.admission.CompareAndSwap(state, state+(uint64(1)<<shift)) {
-			return slot
-		}
+func (l *Logger) joinEpoch() *loggerEpoch {
+	epoch := l.epoch.Load()
+	epoch.active.Add(1)
+	if !epoch.closed.Load() {
+		return epoch
 	}
+	epoch.active.Add(^uint32(0))
+	epoch = l.epoch.Load()
+	epoch.active.Add(1)
+	return epoch
 }
-func (l *Logger) leaveEpoch(slot uint64) {
-	shift := uint(1)
-	if slot != 0 {
-		shift = 32
-	}
-	for {
-		state := l.admission.Load()
-		if l.admission.CompareAndSwap(state, state-(uint64(1)<<shift)) {
+func (l *Logger) leaveEpoch(epoch *loggerEpoch) {
+	epoch.active.Add(^uint32(0))
+	l.signal(l.quiescent)
+}
+func (l *Logger) publishTicketCore(ticket uint64, b string, epoch *loggerEpoch) {
+	for target := epoch.target.Load(); target < ticket+1; {
+		if epoch.target.CompareAndSwap(target, ticket+1) {
 			break
 		}
+		target = epoch.target.Load()
 	}
-	l.signal(l.quiescent)
+	i := ticket % 256
+	copy(l.slots[i][:], b)
+	l.lens[i].Store(uint32(len(b)))
+	l.published[i].Store(ticket + 1)
+	l.signal(l.notify)
 }
 func (l *Logger) terminalize(result contract.DeliveryResult, tail uint64) {
 	for head := l.terminal.Load(); head < tail; head++ {

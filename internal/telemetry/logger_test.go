@@ -5,7 +5,9 @@ package telemetry
 import (
 	"context"
 	"errors"
+	gobuild "go/build"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -104,7 +106,7 @@ func TestLoggerShutdownWaitsForReservedProducerPublication(t *testing.T) {
 	l := NewLogger(clock, m, sink)
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	installTicketPause(t, entered, release)
+	installTicketPause(t, l, entered, release)
 	submitted := make(chan struct{})
 	go func() { l.Submit(Record{json: `{"a":1}`}); close(submitted) }()
 	<-entered
@@ -138,7 +140,7 @@ func TestLoggerWaitQuiescentSnapshotsTailOnce(t *testing.T) {
 	l := NewLogger(clock, m, sink)
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	installTicketPause(t, entered, release)
+	installTicketPause(t, l, entered, release)
 	firstDone := make(chan struct{})
 	go func() { l.Submit(Record{json: `{"first":true}`}); close(firstDone) }()
 	<-entered
@@ -415,12 +417,17 @@ func TestLoggerTestControlSourceIsTaggedAndLimited(t *testing.T) {
 	if got := strings.Count(string(control), "func (l *Logger) "); got != 1 || !strings.Contains(string(control), "func (l *Logger) WaitQuiescent()") {
 		t.Fatalf("test-control methods=%d", got)
 	}
-	for _, name := range []string{"logger.go", "sink.go", "sink_stream.go", "ticket_pause.go"} {
-		b, err := os.ReadFile(dir + name)
+	pkg, err := gobuild.Default.ImportDir(filepath.Clean(dir), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range pkg.GoFiles {
+		b, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(b), "WaitQuiescent") || strings.Contains(string(b), "TestControl") {
+		lower := strings.ToLower(string(b))
+		if strings.Contains(string(b), "WaitQuiescent") || strings.Contains(string(b), "TestControl") || strings.Contains(lower, "pause") || strings.Contains(lower, "hook") {
 			t.Fatalf("ordinary source %s exposes test control", name)
 		}
 	}
@@ -428,7 +435,7 @@ func TestLoggerTestControlSourceIsTaggedAndLimited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"loggerTicketHook", "ticketHook"} {
+	for _, forbidden := range []string{"loggerTicketHook", "ticketHook", "loggerTicketPause"} {
 		if strings.Contains(string(logger), forbidden) {
 			t.Fatalf("ordinary logger contains %q", forbidden)
 		}
