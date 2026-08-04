@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -94,6 +95,42 @@ func TestGeneratedDocsRenderManifestMetadataAndProfiles(t *testing.T) {
 	}
 	if string(renderGo(m)) == string(renderGo(m2)) || string(renderDocs(m)) == string(renderDocs(m2)) {
 		t.Fatal("manifest host did not change both generated artifacts")
+	}
+}
+
+func TestGeneratorBuildsAndRepairsMissingOwnedOutput(t *testing.T) {
+	source, err := findRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for _, path := range []string{"go.mod", "go.sum", "policy/profiles.yaml", "internal/tools/profilegen/main.go", "internal/hostname/hostname.go"} {
+		body, err := os.ReadFile(filepath.Join(source, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		output := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(output, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := exec.Command("go", "run", "./internal/tools/profilegen", "-check")
+	check.Dir = root
+	if out, err := check.CombinedOutput(); err == nil || !strings.Contains(string(out), "generated output drift") {
+		t.Fatalf("check missing output = %v: %s", err, out)
+	}
+	generate := exec.Command("go", "run", "./internal/tools/profilegen")
+	generate.Dir = root
+	if out, err := generate.CombinedOutput(); err != nil {
+		t.Fatalf("generate = %v: %s", err, out)
+	}
+	check = exec.Command("go", "run", "./internal/tools/profilegen", "-check")
+	check.Dir = root
+	if out, err := check.CombinedOutput(); err != nil {
+		t.Fatalf("check after generate = %v: %s", err, out)
 	}
 }
 

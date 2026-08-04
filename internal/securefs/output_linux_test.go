@@ -71,3 +71,28 @@ func TestPublishOutputRejectsTempPathSwapAtCommitBoundary(t *testing.T) {
 		t.Fatalf("target = %q, %v; want old unchanged", got, readErr)
 	}
 }
+
+func TestPublishOutputReportsPublishedButNotDurableWhenCanceledAfterRename(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenMutableRoot(dir, RootPolicy{Access: LinuxExactPermissions(uint32(os.Getuid()), fs.FileMode(0o700))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = ContextWithOutputPublishedHookForTest(ctx, func() { cancel() })
+	boundary, err := r.PublishOutput(ctx, "proxy.pac", []byte("new"), mutableFilePolicy(Optional, 64))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("PublishOutput error = %v, want context.Canceled", err)
+	}
+	if boundary != (CommitBoundary{NamespacePublished: true, TargetDurable: false}) {
+		t.Fatalf("PublishOutput boundary = %+v", boundary)
+	}
+	got, readErr := os.ReadFile(filepath.Join(dir, "proxy.pac"))
+	if readErr != nil || string(got) != "new" {
+		t.Fatalf("target = %q, %v; want published new", got, readErr)
+	}
+}

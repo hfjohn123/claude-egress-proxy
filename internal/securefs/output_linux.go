@@ -89,6 +89,10 @@ func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy Root
 		}
 		return CommitBoundary{}, ErrUnsafePath
 	}
+	linuxOutputPublishedHook(ctx)
+	if err := ctx.Err(); err != nil {
+		return CommitBoundary{NamespacePublished: true, TargetDurable: false}, err
+	}
 	if unix.Fsync(r.fd) != nil {
 		return CommitBoundary{NamespacePublished: true}, ErrUnsafePath
 	}

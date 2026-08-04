@@ -17,3 +17,16 @@ func linuxOutputCommitHook(ctx context.Context) error {
 	}
 	return hook()
 }
+
+type outputPublishedHookKey struct{}
+
+func ContextWithOutputPublishedHookForTest(ctx context.Context, hook func()) context.Context {
+	return context.WithValue(ctx, outputPublishedHookKey{}, hook)
+}
+
+func linuxOutputPublishedHook(ctx context.Context) {
+	hook, _ := ctx.Value(outputPublishedHookKey{}).(func())
+	if hook != nil {
+		hook()
+	}
+}

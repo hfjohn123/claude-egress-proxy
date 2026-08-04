@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/hfjohn123/claude-egress-proxy/internal/policy"
+	"github.com/hfjohn123/claude-egress-proxy/internal/hostname"
 	"golang.org/x/net/publicsuffix"
 	"gopkg.in/yaml.v3"
 )
@@ -205,7 +205,7 @@ func hostList(n *yaml.Node, suffix bool) ([]string, error) {
 		if scalar(v, v.Value, "!!str") != nil {
 			return nil, errors.New("non-string host")
 		}
-		normalized, err := policy.NormalizeHostname(v.Value)
+		normalized, err := hostname.Normalize(v.Value)
 		if err != nil || normalized != v.Value {
 			return nil, errors.New("noncanonical host")
 		}
