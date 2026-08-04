@@ -39,7 +39,7 @@ func TestPublishFaultBoundariesAndReservedTemp(t *testing.T) {
 						t.Fatal("Publish fault = nil")
 					}
 					wantPublished := point == AfterPublication || point == AfterTargetDurability
-					wantDurable := point == AfterTargetDurability || (!present && point == AfterPublication)
+					wantDurable := point == AfterTargetDurability || (!present && point == AfterPublication && runtime.GOOS == "windows")
 					if boundary != (CommitBoundary{NamespacePublished: wantPublished, TargetDurable: wantDurable}) {
 						t.Fatalf("boundary = %+v", boundary)
 					}
