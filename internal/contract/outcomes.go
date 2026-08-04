@@ -98,7 +98,6 @@ type ConnectResult uint8
 const (
 	connectEstablished ConnectResult = iota
 	connectMalformedRequest
-	connectHeaderTooLarge
 	connectPortDenied
 	connectHostnameDenied
 	connectAddressDenied
@@ -117,7 +116,7 @@ const (
 )
 
 func AllConnectResults() []string {
-	return []string{"established", "malformed_request", "header_too_large", "port_denied", "hostname_denied", "address_denied", "dns_failed", "dial_failed", "setup_timeout", "credential_store_unavailable", "source_bind_unavailable", "self_address_state_unavailable", "global_capacity", "device_capacity", "draining", "credential_changed", "client_disconnected", "internal_error"}
+	return []string{"established", "malformed_request", "port_denied", "hostname_denied", "address_denied", "dns_failed", "dial_failed", "setup_timeout", "credential_store_unavailable", "source_bind_unavailable", "self_address_state_unavailable", "global_capacity", "device_capacity", "draining", "credential_changed", "client_disconnected", "internal_error"}
 }
 func ParseConnectResult(value string) (ConnectResult, bool) {
 	switch value {
@@ -125,8 +124,6 @@ func ParseConnectResult(value string) (ConnectResult, bool) {
 		return connectEstablished, true
 	case "malformed_request":
 		return connectMalformedRequest, true
-	case "header_too_large":
-		return connectHeaderTooLarge, true
 	case "port_denied":
 		return connectPortDenied, true
 	case "hostname_denied":
@@ -167,8 +164,6 @@ func (r ConnectResult) String() string {
 		return "established"
 	case connectMalformedRequest:
 		return "malformed_request"
-	case connectHeaderTooLarge:
-		return "header_too_large"
 	case connectPortDenied:
 		return "port_denied"
 	case connectHostnameDenied:
@@ -719,4 +714,38 @@ func (o PublicSelfOutcome) String() string {
 type ByteTotals struct {
 	ClientToOrigin uint64
 	OriginToClient uint64
+}
+
+// ServiceStateReason classifies a closed service lifecycle record.
+type ServiceStateReason uint8
+
+const (
+	serviceStarted ServiceStateReason = iota
+	serviceReady
+	serviceDraining
+	serviceStopped
+	serviceCredentialStoreRecovered
+	serviceNotReady
+	serviceInsecureLoopback
+	serviceDangerousCustomSuffixes
+	serviceCredentialStoreUnavailable
+	serviceStartupFailed
+)
+
+func AllServiceStateReasons() []string {
+	return []string{"started", "ready", "draining", "stopped", "credential_store_recovered", "not_ready", "insecure_loopback", "dangerous_custom_suffixes", "credential_store_unavailable", "startup_failed"}
+}
+func ParseServiceStateReason(value string) (ServiceStateReason, bool) {
+	for i, candidate := range AllServiceStateReasons() {
+		if value == candidate {
+			return ServiceStateReason(i), true
+		}
+	}
+	return 0, false
+}
+func (r ServiceStateReason) String() string {
+	if r < serviceStarted || r > serviceStartupFailed {
+		panic("invalid service state reason")
+	}
+	return AllServiceStateReasons()[r]
 }

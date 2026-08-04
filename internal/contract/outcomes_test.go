@@ -12,7 +12,8 @@ func TestResultsAreClosed(t *testing.T) {
 		want  []string
 		parse func(string) bool
 	}{
-		{"connect", AllConnectResults(), []string{"established", "malformed_request", "header_too_large", "port_denied", "hostname_denied", "address_denied", "dns_failed", "dial_failed", "setup_timeout", "credential_store_unavailable", "source_bind_unavailable", "self_address_state_unavailable", "global_capacity", "device_capacity", "draining", "credential_changed", "client_disconnected", "internal_error"}, func(value string) bool { _, ok := ParseConnectResult(value); return ok }},
+		{"connect", AllConnectResults(), []string{"established", "malformed_request", "port_denied", "hostname_denied", "address_denied", "dns_failed", "dial_failed", "setup_timeout", "credential_store_unavailable", "source_bind_unavailable", "self_address_state_unavailable", "global_capacity", "device_capacity", "draining", "credential_changed", "client_disconnected", "internal_error"}, func(value string) bool { _, ok := ParseConnectResult(value); return ok }},
+		{"service state", AllServiceStateReasons(), []string{"started", "ready", "draining", "stopped", "credential_store_recovered", "not_ready", "insecure_loopback", "dangerous_custom_suffixes", "credential_store_unavailable", "startup_failed"}, func(value string) bool { _, ok := ParseServiceStateReason(value); return ok }},
 		{"tls", AllTLSResults(), []string{"success", "rate_limited", "timeout", "tls_error"}, func(value string) bool { _, ok := ParseTLSResult(value); return ok }},
 		{"authentication", AllAuthenticationResults(), []string{"challenge", "valid", "invalid", "throttled", "map_capacity", "store_unavailable"}, func(value string) bool { _, ok := ParseAuthenticationResult(value); return ok }},
 		{"pac", AllPACResults(), []string{"served", "disabled", "not_found", "prefix_rate_limited", "global_rate_limited", "map_capacity", "capacity"}, func(value string) bool { _, ok := ParsePACResult(value); return ok }},
@@ -127,6 +128,7 @@ func TestImpossibleEnumStringPanics(t *testing.T) {
 		{"tunnel", func() string { return TunnelOutcome(255).String() }},
 		{"readiness", func() string { return ReadinessPredicate(255).String() }},
 		{"public self", func() string { return PublicSelfOutcome(255).String() }},
+		{"service state", func() string { return ServiceStateReason(255).String() }},
 	}
 
 	for _, test := range tests {

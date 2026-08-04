@@ -11,7 +11,6 @@ const (
 	frameMethodNotAllowedGet
 	frameProxyAuthenticationRequired
 	frameTooManyRequests
-	frameRequestHeaderFieldsTooLarge
 	frameInternalError
 	frameBadGateway
 	frameServiceUnavailable
@@ -28,7 +27,7 @@ const (
 
 var allFrames = []string{
 	"bad_request", "forbidden", "not_found", "method_not_allowed_connect", "method_not_allowed_get",
-	"proxy_authentication_required", "too_many_requests", "request_header_fields_too_large", "internal_error",
+	"proxy_authentication_required", "too_many_requests", "internal_error",
 	"bad_gateway", "service_unavailable", "gateway_timeout", "http_version_not_supported", "connect_established",
 	"pac_ok", "health_ok", "ready_ok", "not_ready", "metrics_unauthorized", "metrics_ok",
 }
@@ -53,8 +52,6 @@ func ParseFrame(value string) (Frame, bool) {
 		return frameProxyAuthenticationRequired, true
 	case "too_many_requests":
 		return frameTooManyRequests, true
-	case "request_header_fields_too_large":
-		return frameRequestHeaderFieldsTooLarge, true
 	case "internal_error":
 		return frameInternalError, true
 	case "bad_gateway":
@@ -100,8 +97,6 @@ func (f Frame) String() string {
 		return "proxy_authentication_required"
 	case frameTooManyRequests:
 		return "too_many_requests"
-	case frameRequestHeaderFieldsTooLarge:
-		return "request_header_fields_too_large"
 	case frameInternalError:
 		return "internal_error"
 	case frameBadGateway:

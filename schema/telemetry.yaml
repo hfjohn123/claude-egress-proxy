@@ -1,0 +1,9 @@
+version: v1
+metrics:
+  namespace: claude_proxy
+  closed: true
+logs:
+  max_bytes: 2047
+  sensitive_extension: all_or_none
+matrix:
+  primary_emitter: closed

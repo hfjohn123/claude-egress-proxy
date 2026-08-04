@@ -8,7 +8,7 @@ import (
 func TestFramesAreClosed(t *testing.T) {
 	want := []string{
 		"bad_request", "forbidden", "not_found", "method_not_allowed_connect", "method_not_allowed_get",
-		"proxy_authentication_required", "too_many_requests", "request_header_fields_too_large", "internal_error",
+		"proxy_authentication_required", "too_many_requests", "internal_error",
 		"bad_gateway", "service_unavailable", "gateway_timeout", "http_version_not_supported", "connect_established",
 		"pac_ok", "health_ok", "ready_ok", "not_ready", "metrics_unauthorized", "metrics_ok",
 	}
