@@ -14,3 +14,6 @@ GREEN: manual clock records/fires exact deadlines without sleeps. Completion at
 249ms writes; exact 250ms fails active plus queue; sink errors are permanent;
 shutdown keeps later submissions frozen to its deadline result while accepted
 records still receive sink-failed; exact one-second shutdown wins ties.
+
+GREEN: tagged quiescence now uses one constructor-owned condition variable;
+terminal delivery no longer allocates/replaces a notification channel.

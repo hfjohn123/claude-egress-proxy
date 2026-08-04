@@ -7,10 +7,7 @@ func (l *Logger) WaitQuiescent() {
 	l.mu.Lock()
 	target := l.submitted
 	for l.delivered < target {
-		wait := l.quiescent
-		l.mu.Unlock()
-		<-wait
-		l.mu.Lock()
+		l.quiescent.Wait()
 	}
 	l.mu.Unlock()
 }

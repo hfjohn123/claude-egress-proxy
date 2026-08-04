@@ -33,7 +33,7 @@ type Logger struct {
 	done                                              chan struct{}
 	closed                                            bool
 	submitted, delivered                              uint64
-	quiescent                                         chan struct{}
+	quiescent                                         *sync.Cond
 }
 
 func NewLogger(clock timebase.Clock, metrics *Metrics, sink Sink) *Logger {
@@ -41,7 +41,8 @@ func NewLogger(clock timebase.Clock, metrics *Metrics, sink Sink) *Logger {
 		panic(loggerInvalid)
 	}
 	l := &Logger{clock: clock, metrics: metrics, sink: sink, active: -1, accepting: sink != nil,
-		notify: make(chan struct{}, 1), done: make(chan struct{}), quiescent: make(chan struct{}), callDone: make(chan error, 1)}
+		notify: make(chan struct{}, 1), done: make(chan struct{}), callDone: make(chan error, 1)}
+	l.quiescent = sync.NewCond(&l.mu)
 	for i := range l.free {
 		l.free[i] = i
 	}
@@ -236,8 +237,7 @@ func (l *Logger) closeLocked() {
 func (l *Logger) recordLocked(v contract.DeliveryResult) {
 	l.metrics.RecordDelivery(v)
 	l.delivered++
-	close(l.quiescent)
-	l.quiescent = make(chan struct{})
+	l.quiescent.Broadcast()
 }
 func (l *Logger) signalLocked() {
 	select {
