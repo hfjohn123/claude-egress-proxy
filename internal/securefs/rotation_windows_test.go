@@ -19,6 +19,14 @@ func TestAcquireRotationNamespaceRejectsUnsafeLeaves(t *testing.T) {
 	}
 }
 
+// Keep the platform implementation tied to the public namespace contract.
+func TestWindowsRotationNamespaceExposesTombstoneRepair(t *testing.T) {
+	var repair func(*windowsRotationNamespace) error = (*windowsRotationNamespace).RepairTombstone
+	if repair == nil {
+		t.Fatal("RepairTombstone method missing")
+	}
+}
+
 // WindowsRestrictedPermissionsForTest supplies a syntactically valid policy;
 // the unsafe-leaf assertion above must happen before root use.
 func windowsRestrictedPermissionsForRotationTest(t *testing.T) PermissionPolicy {

@@ -27,6 +27,7 @@ type windowsRotationNamespace struct {
 	tomb       *windowsRetainedFile
 
 	mu       sync.Mutex
+	mutation sync.Mutex
 	closing  bool
 	closed   bool
 	active   int
@@ -177,6 +178,39 @@ func (n *windowsRotationNamespace) RecheckIdentity() error {
 	defer n.end()
 	return n.op.recheck()
 }
+
+// RepairTombstone discards interrupted-rotation bytes through the retained
+// handle. The pathname is inspected only to confirm attachment identity.
+func (n *windowsRotationNamespace) RepairTombstone() error {
+	n.mutation.Lock()
+	defer n.mutation.Unlock()
+	if n.tomb == nil {
+		return ErrUnsafePath
+	}
+	h, err := n.tomb.begin()
+	if err != nil {
+		return err
+	}
+	defer n.tomb.end()
+	if err := n.tomb.usable(h); err != nil {
+		return err
+	}
+	state, err := n.op.inspect(n.base+".delete", rotationPolicy(n.policy, Required))
+	if err != nil || !state.Present || state.Identity != n.tomb.id {
+		return ErrIdentityChanged
+	}
+	if _, err := winSeek(h, 0); err != nil {
+		return ErrUnsafePath
+	}
+	if err := windows.SetEndOfFile(h); err != nil {
+		return ErrUnsafePath
+	}
+	if err := windows.FlushFileBuffers(h); err != nil {
+		return ErrUnsafePath
+	}
+	return nil
+}
+
 func (n *windowsRotationNamespace) allowed(name string) bool {
 	return name == n.leaves[0] || name == n.leaves[1] || name == n.leaves[2]
 }
@@ -252,6 +286,8 @@ func (n *windowsRotationNamespace) Rotate(leaves [3]string, ids [3]Identity) (Re
 		return nil, err
 	}
 	defer n.end()
+	n.mutation.Lock()
+	defer n.mutation.Unlock()
 	for i, name := range leaves {
 		state, err := n.op.inspect(name, rotationPolicy(n.policy, Required))
 		if err != nil || !state.Present || state.Identity != ids[i] {
