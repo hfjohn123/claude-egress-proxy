@@ -47,7 +47,11 @@ func TestPACHandlerOrdersValidationBeforeOutputAndUsesSelectedConfig(t *testing.
 		loadErr, policyErr, renderErr error
 		want                          contract.DiagnosticCode
 	}{
+		{"config D001", pacDiagnostic(contract.D001), nil, nil, contract.D001},
+		{"config D002", pacDiagnostic(contract.D002), nil, nil, contract.D002},
 		{"config", pacDiagnostic(contract.D003), nil, nil, contract.D003},
+		{"config D004", pacDiagnostic(contract.D004), nil, nil, contract.D004},
+		{"config D010", pacDiagnostic(contract.D010), nil, nil, contract.D010},
 		{"policy", nil, errors.New("policy"), nil, contract.D003},
 		{"render", nil, nil, errors.New("render"), contract.D003},
 	} {
