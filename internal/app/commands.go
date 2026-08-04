@@ -227,22 +227,42 @@ func initFailure(code contract.DiagnosticCode) Result {
 func ProductionDependencies() Dependencies {
 	checkout, err := config.CheckoutIdentity()
 	if err != nil {
-		return Dependencies{Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }}
+		return Dependencies{Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, PAC: NewPACHandler()}
 	}
 	return Dependencies{Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Checkout: checkout}), PAC: NewPACHandler()}
 }
 
 func NewPACHandler() Handler {
+	return newPACHandler(pacDependencies{
+		defaults:   config.PlatformDefaults,
+		load:       func(path string) (pacLoaded, error) { return config.Load(path, config.ValidatePure) },
+		policyLoad: policy.Load, render: pac.Render, publish: publishPAC,
+	})
+}
+
+type pacLoaded interface {
+	Config() config.Config
+	Close() error
+}
+type pacDependencies struct {
+	defaults   func() (config.DefaultPaths, error)
+	load       func(string) (pacLoaded, error)
+	policyLoad func(string, policy.CustomRules) (policy.Policy, error)
+	render     func(policy.Policy, pac.ProxyEndpoint, pac.Visibility) ([]byte, error)
+	publish    func(context.Context, cli.Invocation, []byte) error
+}
+
+func newPACHandler(deps pacDependencies) Handler {
 	return func(ctx context.Context, invocation cli.Invocation) Result {
 		path := invocation.ConfigPath
 		if path == "" {
-			defaults, err := config.PlatformDefaults()
+			defaults, err := deps.defaults()
 			if err != nil {
 				return initFailure(contract.D010)
 			}
 			path = defaults.Config
 		}
-		loaded, err := config.Load(path, config.ValidatePure)
+		loaded, err := deps.load(path)
 		if err != nil {
 			return initFailure(configCode(err))
 		}
@@ -255,7 +275,7 @@ func NewPACHandler() Handler {
 		} else if destination.Profile() == config.ProfileAll {
 			profileName = "all"
 		}
-		p, err := policy.Load(profileName, policy.CustomRules{ExactHosts: destination.ExactHosts(), Suffixes: destination.Suffixes(), DangerousCustomSuffixes: destination.DangerousCustomSuffixes()})
+		p, err := deps.policyLoad(profileName, policy.CustomRules{ExactHosts: destination.ExactHosts(), Suffixes: destination.Suffixes(), DangerousCustomSuffixes: destination.DangerousCustomSuffixes()})
 		if err != nil {
 			return initFailure(contract.D003)
 		}
@@ -280,36 +300,43 @@ func NewPACHandler() Handler {
 				return initFailure(contract.D003)
 			}
 		}
-		body, err := pac.Render(p, endpoint, pac.VisibilityLocal)
+		body, err := deps.render(p, endpoint, pac.VisibilityLocal)
 		if err != nil {
 			return initFailure(contract.D003)
 		}
-		policies, err := config.PlatformSecurityPolicies()
-		if err != nil {
-			return initFailure(contract.D010)
-		}
-		output := policies.ConfigFile
-		output.Presence = securefs.Optional
-		output.Kind = securefs.RegularFile
-		output.MaxBytes = int64(contract.V1().PACBytes)
-		checkout, err := config.CheckoutIdentity()
-		if err != nil {
-			return initFailure(contract.D004)
-		}
-		parent, name, _, err := securefs.ValidateMutableOutput(invocation.PACOutput, checkout, policies.ConfigDirectory, output)
-		if err != nil {
+		if err := deps.publish(ctx, invocation, body); err != nil {
 			return initFailure(pacPathCode(err))
-		}
-		defer parent.Close()
-		boundary, err := parent.PublishOutput(ctx, name, body, output)
-		if err != nil {
-			return initFailure(pacPathCode(err))
-		}
-		if !boundary.NamespacePublished || !boundary.TargetDurable {
-			return initFailure(contract.D010)
 		}
 		return Result{ExitCode: 0}
 	}
+}
+
+func publishPAC(ctx context.Context, invocation cli.Invocation, body []byte) error {
+	policies, err := config.PlatformSecurityPolicies()
+	if err != nil {
+		return err
+	}
+	output := policies.ConfigFile
+	output.Presence = securefs.Optional
+	output.Kind = securefs.RegularFile
+	output.MaxBytes = int64(contract.V1().PACBytes)
+	checkout, err := config.CheckoutIdentity()
+	if err != nil {
+		return securefs.ErrIdentityChanged
+	}
+	parent, name, _, err := securefs.ValidateMutableOutput(invocation.PACOutput, checkout, policies.ConfigDirectory, output)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	boundary, err := parent.PublishOutput(ctx, name, body, output)
+	if err != nil {
+		return err
+	}
+	if !boundary.NamespacePublished || !boundary.TargetDurable {
+		return securefs.ErrUnsupportedInspection
+	}
+	return nil
 }
 
 func configCode(err error) contract.DiagnosticCode {
