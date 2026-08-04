@@ -41,3 +41,22 @@ Final verification: `go test -tags=cep_testcontrol ./internal/telemetry -run
 'Test(Logger|BlockedSink|Shutdown|Stream)' -count=20`, `go test ./...`, `go vet
 ./...`, and `git diff --check` pass. The Windows host cannot run the race suite:
 `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`.
+
+## Review fix round 1
+
+RED: review exposed that shutdown published its atomic gate before installing
+the deadline/timer, ordinary test-pause state lived in `Logger`, a single
+in-flight count allowed post-gate rejections to postpone draining, and tagged
+quiescence independently sampled a moving counter and tail.
+
+GREEN: shutdown and accepting-to-failed publication now coordinate with the
+supervisor under `stateMu`; shutdown initializes all deadline state before the
+lock-free gate store. The drain barrier now counts only capacity-owning
+producers through their final gate recheck and ticket publication. Tagged
+quiescence uses a CAS-managed two-side admission sequence: it flips a side,
+waits only submissions already admitted to the old side (including synchronous
+results), snapshots `tail` once, then waits for that fixed terminal target.
+The deterministic one-shot ticket pause moved to `cep_testcontrol` files, with
+an inlineable no-op ordinary counterpart; ordinary `Logger` has no hook field
+or hook type/branch. Source checks now reject the former hook names from
+ordinary logger code.

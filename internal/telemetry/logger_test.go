@@ -104,9 +104,7 @@ func TestLoggerShutdownWaitsForReservedProducerPublication(t *testing.T) {
 	l := NewLogger(clock, m, sink)
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	if !l.ticketHook.CompareAndSwap(nil, &loggerTicketHook{entered: entered, release: release}) {
-		t.Fatal("ticket hook unavailable")
-	}
+	installTicketPause(t, entered, release)
 	submitted := make(chan struct{})
 	go func() { l.Submit(Record{json: `{"a":1}`}); close(submitted) }()
 	<-entered
@@ -140,9 +138,7 @@ func TestLoggerWaitQuiescentSnapshotsTailOnce(t *testing.T) {
 	l := NewLogger(clock, m, sink)
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	if !l.ticketHook.CompareAndSwap(nil, &loggerTicketHook{entered: entered, release: release}) {
-		t.Fatal("ticket hook unavailable")
-	}
+	installTicketPause(t, entered, release)
 	firstDone := make(chan struct{})
 	go func() { l.Submit(Record{json: `{"first":true}`}); close(firstDone) }()
 	<-entered
@@ -419,13 +415,22 @@ func TestLoggerTestControlSourceIsTaggedAndLimited(t *testing.T) {
 	if got := strings.Count(string(control), "func (l *Logger) "); got != 1 || !strings.Contains(string(control), "func (l *Logger) WaitQuiescent()") {
 		t.Fatalf("test-control methods=%d", got)
 	}
-	for _, name := range []string{"logger.go", "sink.go", "sink_stream.go"} {
+	for _, name := range []string{"logger.go", "sink.go", "sink_stream.go", "ticket_pause.go"} {
 		b, err := os.ReadFile(dir + name)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if strings.Contains(string(b), "WaitQuiescent") || strings.Contains(string(b), "TestControl") {
 			t.Fatalf("ordinary source %s exposes test control", name)
+		}
+	}
+	logger, err := os.ReadFile(dir + "logger.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"loggerTicketHook", "ticketHook"} {
+		if strings.Contains(string(logger), forbidden) {
+			t.Fatalf("ordinary logger contains %q", forbidden)
 		}
 	}
 }
