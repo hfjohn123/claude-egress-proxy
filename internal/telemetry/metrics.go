@@ -16,12 +16,12 @@ const invalidClosed = "telemetry: invalid closed value"
 
 type StateSnapshot struct{ TLSHandshakeLimiterEntries, AuthenticationLimiterEntries, PACLimiterEntries, PreAuthConnections, PendingSetupReservations, ActiveTunnels, CredentialGeneration uint64 }
 type Metrics struct {
-	registry                                                  *prometheus.Registry
-	clock                                                     timebase.Clock
-	certificateNotAfter                                       func() (time.Time, bool)
-	state                                                     atomic.Pointer[StateSnapshot]
-	tls, auth, connect, pac, limiter, reload, delivery, bytes *prometheus.CounterVec
-	setup, tunnel                                             *prometheus.HistogramVec
+	registry                                                          *prometheus.Registry
+	clock                                                             timebase.Clock
+	certificateNotAfter                                               func() (time.Time, bool)
+	state                                                             atomic.Pointer[StateSnapshot]
+	tls, auth, connect, closes, pac, limiter, reload, delivery, bytes *prometheus.CounterVec
+	setup, tunnel                                                     *prometheus.HistogramVec
 }
 
 func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, error) {
@@ -33,6 +33,7 @@ func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, 
 	m.tls = cv("claude_proxy_tls_handshakes_total")
 	m.auth = cv("claude_proxy_authentication_total")
 	m.connect = cv("claude_proxy_connect_total")
+	m.closes = cv("claude_proxy_tunnel_closes_total")
 	m.pac = cv("claude_proxy_pac_total")
 	m.limiter = cv("claude_proxy_limiter_events_total")
 	m.reload = cv("claude_proxy_reload_total")
@@ -40,7 +41,7 @@ func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, 
 	m.bytes = cv("claude_proxy_bytes_total")
 	m.setup = hv("claude_proxy_setup_duration_seconds")
 	m.tunnel = hv("claude_proxy_tunnel_duration_seconds")
-	for _, c := range []prometheus.Collector{m.tls, m.auth, m.connect, m.pac, m.limiter, m.reload, m.delivery, m.bytes, m.setup, m.tunnel} {
+	for _, c := range []prometheus.Collector{m.tls, m.auth, m.connect, m.closes, m.pac, m.limiter, m.reload, m.delivery, m.bytes, m.setup, m.tunnel} {
 		if err := m.registry.Register(c); err != nil {
 			return nil, ErrInvalidMetrics
 		}
@@ -53,6 +54,9 @@ func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, 
 	}
 	for _, v := range contract.AllConnectResults() {
 		m.connect.WithLabelValues(v)
+	}
+	for _, v := range contract.AllCloseResults() {
+		m.closes.WithLabelValues(v)
 	}
 	for _, v := range contract.AllPACResults() {
 		m.pac.WithLabelValues(v)
@@ -162,9 +166,10 @@ func (m *Metrics) ObserveSetup(o contract.SetupOutcome, d time.Duration) {
 	m.setup.WithLabelValues(validSetup(o)).Observe(d.Seconds())
 }
 func (m *Metrics) FinishTunnel(c contract.CloseResult, o contract.TunnelOutcome, d time.Duration, b contract.ByteTotals) {
-	if d < 0 || contract.TunnelOutcomeForCloseResult(c) != o {
+	if d < 0 || !validCloseResult(c) || !validTunnelOutcome(o) || b.ClientToOrigin > 1<<53-1 || b.OriginToClient > 1<<53-1 || contract.TunnelOutcomeForCloseResult(c) != o {
 		panic(invalidClosed)
 	}
+	m.closes.WithLabelValues(validClose(c)).Inc()
 	m.tunnel.WithLabelValues(validTunnel(o)).Observe(d.Seconds())
 	m.bytes.WithLabelValues("client_to_origin").Add(float64(b.ClientToOrigin))
 	m.bytes.WithLabelValues("origin_to_client").Add(float64(b.OriginToClient))
@@ -201,6 +206,17 @@ func validSetup(v contract.SetupOutcome) string {
 }
 func validTunnel(v contract.TunnelOutcome) string {
 	return enum(func() string { return v.String() }, contract.ParseTunnelOutcome)
+}
+func validTunnelOutcome(v contract.TunnelOutcome) bool {
+	_, ok := contract.ParseTunnelOutcome(safeString(func() string { return v.String() }))
+	return ok
+}
+func validCloseResult(v contract.CloseResult) bool {
+	_, ok := contract.ParseCloseResult(safeString(func() string { return v.String() }))
+	return ok
+}
+func validClose(v contract.CloseResult) string {
+	return enum(func() string { return v.String() }, contract.ParseCloseResult)
 }
 func validDelivery(v contract.DeliveryResult) string {
 	return enum(func() string { return v.String() }, contract.ParseDeliveryResult)
