@@ -125,3 +125,8 @@ GREEN: tagged state now offers a one-shot capture handshake. `WaitQuiescent`
 signals it immediately after loading the fixed tail, while still holding the
 snapshot mutex. Exclusion tests wait for that exact event before appending later
 work, eliminating the scheduler race without sleeps or production seams.
+
+Final verification after round 5 passed: the tagged telemetry suite at count
+20, all package tests, vet, telemetry generation, module verification, and
+`git diff --check`. Scoped Cavecrew re-review is clean. The Windows host still
+cannot run the race suite because CGO is disabled and no C compiler is present.
