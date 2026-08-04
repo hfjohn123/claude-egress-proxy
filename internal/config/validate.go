@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
+	"github.com/hfjohn123/claude-egress-proxy/internal/policy"
 	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
 )
 
@@ -394,6 +395,16 @@ func validateRaw(r rawConfig) (Config, error) {
 		c.destination.suffixes = append([]string(nil), r.Destination.Suffixes...)
 		c.destination.dangerousCustomSuffixes = r.Destination.DangerousCustomSuffixes
 	}
+	profileName := "code"
+	switch c.destination.profile {
+	case ProfileWebDesktop:
+		profileName = "web-desktop"
+	case ProfileAll:
+		profileName = "all"
+	}
+	if _, err := policy.Load(profileName, policy.CustomRules{ExactHosts: c.destination.exactHosts, Suffixes: c.destination.suffixes, DangerousCustomSuffixes: c.destination.dangerousCustomSuffixes}); err != nil {
+		return bad()
+	}
 	c.logging.sink = LogSinkDefault
 	if r.Logging != nil {
 		sink := "default"
@@ -466,24 +477,5 @@ func validHostname(s string) bool {
 }
 func alnum(b byte) bool { return b >= 'a' && b <= 'z' || b >= '0' && b <= '9' }
 func globalIPv4(a netip.Addr) bool {
-	if !a.Is4() || !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsUnspecified() {
-		return false
-	}
-	if a == netip.MustParseAddr("192.0.0.9") || a == netip.MustParseAddr("192.0.0.10") {
-		return true
-	}
-	for _, prefix := range nonGlobalIPv4Prefixes {
-		if prefix.Contains(a) {
-			return false
-		}
-	}
-	return true
-}
-
-var nonGlobalIPv4Prefixes = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("192.0.0.0/24"), netip.MustParsePrefix("192.0.2.0/24"),
-	netip.MustParsePrefix("192.88.99.0/24"), netip.MustParsePrefix("198.18.0.0/15"),
-	netip.MustParsePrefix("198.51.100.0/24"), netip.MustParsePrefix("203.0.113.0/24"),
-	netip.MustParsePrefix("240.0.0.0/4"),
+	return policy.Classify(a) == policy.AddressGlobalIPv4
 }

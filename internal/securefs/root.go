@@ -121,6 +121,7 @@ type CreateCapableRoot interface {
 // intentionally available only through a held OS lock callback.
 type MutableRoot interface {
 	Root
+	PublishOutput(context.Context, string, []byte, FilePolicy) (CommitBoundary, error)
 	WithExclusiveLock(context.Context, string, FilePolicy, func(LockedFile) error) error
 	AcquireRotationNamespace(context.Context, string, [3]string, FilePolicy) (RotationNamespace, error)
 }
@@ -432,6 +433,19 @@ func (r *mutableRoot) ReadFile(name string, policy FilePolicy) ([]byte, FileStat
 	}
 	defer r.release()
 	return r.op.readFile(name, policy)
+}
+func (r *mutableRoot) PublishOutput(ctx context.Context, name string, data []byte, policy FilePolicy) (CommitBoundary, error) {
+	if ctx == nil || !validLeaf(name) || !validMutableEntryPolicy(policy) || (policy.MaxBytes > 0 && int64(len(data)) > policy.MaxBytes) {
+		return CommitBoundary{}, ErrUnsafePath
+	}
+	if err := r.lease(); err != nil {
+		return CommitBoundary{}, err
+	}
+	defer r.release()
+	if err := r.op.recheck(); err != nil {
+		return CommitBoundary{}, err
+	}
+	return platformPublishOutput(ctx, r.op, r.policy, name, data, policy)
 }
 func (r *mutableRoot) WithExclusiveLock(ctx context.Context, name string, policy FilePolicy, fn func(LockedFile) error) error {
 	if ctx == nil || fn == nil || !validLockPolicy(policy) || !validLeaf(name) {

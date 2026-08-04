@@ -361,6 +361,9 @@ func (r *fakeFileSinkRoot) ReadFile(name string, p securefs.FilePolicy) ([]byte,
 	return r.ns.readFile(name, p)
 }
 func (r *fakeFileSinkRoot) Close() error { r.closed = true; return nil }
+func (r *fakeFileSinkRoot) PublishOutput(context.Context, string, []byte, securefs.FilePolicy) (securefs.CommitBoundary, error) {
+	return securefs.CommitBoundary{}, errors.New("unused")
+}
 func (r *fakeFileSinkRoot) WithExclusiveLock(context.Context, string, securefs.FilePolicy, func(securefs.LockedFile) error) error {
 	return errors.New("unused")
 }

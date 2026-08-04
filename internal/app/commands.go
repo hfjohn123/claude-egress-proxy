@@ -13,6 +13,8 @@ import (
 	"github.com/hfjohn123/claude-egress-proxy/internal/cli"
 	"github.com/hfjohn123/claude-egress-proxy/internal/config"
 	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
+	"github.com/hfjohn123/claude-egress-proxy/internal/pac"
+	"github.com/hfjohn123/claude-egress-proxy/internal/policy"
 	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
 )
 
@@ -227,7 +229,106 @@ func ProductionDependencies() Dependencies {
 	if err != nil {
 		return Dependencies{Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }}
 	}
-	return Dependencies{Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Checkout: checkout})}
+	return Dependencies{Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Checkout: checkout}), PAC: NewPACHandler()}
+}
+
+func NewPACHandler() Handler {
+	return func(ctx context.Context, invocation cli.Invocation) Result {
+		path := invocation.ConfigPath
+		if path == "" {
+			defaults, err := config.PlatformDefaults()
+			if err != nil {
+				return initFailure(contract.D010)
+			}
+			path = defaults.Config
+		}
+		loaded, err := config.Load(path, config.ValidatePure)
+		if err != nil {
+			return initFailure(configCode(err))
+		}
+		defer loaded.Close()
+		cfg := loaded.Config()
+		destination := cfg.Destination()
+		profileName := "code"
+		if destination.Profile() == config.ProfileWebDesktop {
+			profileName = "web-desktop"
+		} else if destination.Profile() == config.ProfileAll {
+			profileName = "all"
+		}
+		p, err := policy.Load(profileName, policy.CustomRules{ExactHosts: destination.ExactHosts(), Suffixes: destination.Suffixes(), DangerousCustomSuffixes: destination.DangerousCustomSuffixes()})
+		if err != nil {
+			return initFailure(contract.D003)
+		}
+		addresses := cfg.PublicListener().Addresses()
+		if len(addresses) == 0 {
+			return initFailure(contract.D003)
+		}
+		var endpoint pac.ProxyEndpoint
+		if cfg.TLS().Mode() == config.TLSInsecureLoopback {
+			for _, a := range addresses {
+				if a.Addr().String() == "127.0.0.1" {
+					endpoint, err = pac.LoopbackEndpoint(a.Addr(), a.Port())
+					break
+				}
+			}
+			if err != nil || endpoint == (pac.ProxyEndpoint{}) {
+				return initFailure(contract.D003)
+			}
+		} else {
+			endpoint, err = pac.RemoteEndpoint(cfg.TLS().Hostname(), addresses[0].Port())
+			if err != nil {
+				return initFailure(contract.D003)
+			}
+		}
+		body, err := pac.Render(p, endpoint, pac.VisibilityLocal)
+		if err != nil {
+			return initFailure(contract.D003)
+		}
+		policies, err := config.PlatformSecurityPolicies()
+		if err != nil {
+			return initFailure(contract.D010)
+		}
+		output := policies.ConfigFile
+		output.Presence = securefs.Optional
+		output.Kind = securefs.RegularFile
+		output.MaxBytes = int64(contract.V1().PACBytes)
+		checkout, err := config.CheckoutIdentity()
+		if err != nil {
+			return initFailure(contract.D004)
+		}
+		parent, name, _, err := securefs.ValidateMutableOutput(invocation.PACOutput, checkout, policies.ConfigDirectory, output)
+		if err != nil {
+			return initFailure(pacPathCode(err))
+		}
+		defer parent.Close()
+		boundary, err := parent.PublishOutput(ctx, name, body, output)
+		if err != nil {
+			return initFailure(pacPathCode(err))
+		}
+		if !boundary.NamespacePublished || !boundary.TargetDurable {
+			return initFailure(contract.D010)
+		}
+		return Result{ExitCode: 0}
+	}
+}
+
+func configCode(err error) contract.DiagnosticCode {
+	var typed interface {
+		DiagnosticCode() contract.DiagnosticCode
+	}
+	if errors.As(err, &typed) {
+		return typed.DiagnosticCode()
+	}
+	return contract.D001
+}
+func pacPathCode(err error) contract.DiagnosticCode {
+	if errors.Is(err, securefs.ErrUnsupportedInspection) {
+		return contract.D010
+	}
+	if errors.Is(err, securefs.ErrPermissions) || errors.Is(err, securefs.ErrIdentityChanged) || securefs.IsPathSecurityFailure(err) || errors.Is(err, securefs.ErrUnsafePath) {
+		return contract.D004
+	}
+	return contract.D010
 }
 
 func (d Dependencies) handler(command cli.Command) Handler {

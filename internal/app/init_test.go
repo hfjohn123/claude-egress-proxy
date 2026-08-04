@@ -251,12 +251,15 @@ func TestInitRejectsCaseAliasedWindowsDirectoryPoliciesBeforeMutation(t *testing
 	}
 }
 
-func TestProductionDependenciesWiresOnlyInit(t *testing.T) {
+func TestProductionDependenciesWiresInitAndPAC(t *testing.T) {
 	d := ProductionDependencies()
 	if d.Init == nil {
 		t.Fatal("production init is nil")
 	}
-	if d.Serve != nil || d.Credential != nil || d.AdminToken != nil || d.PAC != nil || d.CheckConfig != nil || d.CheckHealth != nil || d.CheckNetwork != nil || d.Service != nil {
+	if d.PAC == nil {
+		t.Fatal("production PAC is nil")
+	}
+	if d.Serve != nil || d.Credential != nil || d.AdminToken != nil || d.CheckConfig != nil || d.CheckHealth != nil || d.CheckNetwork != nil || d.Service != nil {
 		t.Fatal("later handlers became live")
 	}
 }
