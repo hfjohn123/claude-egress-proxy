@@ -1,0 +1,3 @@
+0a2f6e91ee4b373fb7cf92e912a380ea39e4d75d57b9a1229c7973390a5f1ca7  cmd/claude-egress-proxy/eventlog_windows_arm64.syso
+e5eb83f45c1b29d5ca667d4d4eda4fa6d905153564715fa09d3613d3e18b360a  cmd/claude-egress-proxy/eventlog_windows_amd64.syso
+f484edff555f83855eaa95a6ae9e0e1d1dd719614b42958266fa90bb5603ed43  assets/windows/eventlog.mc
