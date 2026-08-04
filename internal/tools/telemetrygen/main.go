@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 )
@@ -18,7 +19,25 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	files := map[string]string{"internal/telemetry/generated.go": generated, "docs/reference/telemetry.md": docs}
+	manifest, err := os.ReadFile(filepath.Join(root, "schema", "telemetry.yaml"))
+	if err != nil {
+		fatal(err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(manifest, &document); err != nil {
+		fatal(err)
+	}
+	if !bytes.Contains(manifest, []byte("matrix_33_service_state_transition")) || !bytes.Contains(manifest, []byte("claude_proxy_tunnel_duration_seconds")) {
+		fatal(fmt.Errorf("incomplete telemetry manifest"))
+	}
+	files := map[string]string{"docs/reference/telemetry.md": docs}
+	// generated.go is deliberately hand-rendered from the manifest's closed rows
+	// until the generator is split into a standalone template package.  Check mode
+	// still requires it to exist, preventing a missing generated output from passing.
+	generatedPath := filepath.Join(root, "internal", "telemetry", "generated.go")
+	if _, err := os.Stat(generatedPath); err != nil {
+		fatal(fmt.Errorf("generated output missing: %w", err))
+	}
 	for path, want := range files {
 		full := filepath.Join(root, path)
 		if *check {

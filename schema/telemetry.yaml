@@ -1,9 +1,73 @@
 version: v1
 metrics:
-  namespace: claude_proxy
-  closed: true
-logs:
+  - {name: claude_proxy_tls_handshakes_total, type: counter, help: "Total outer TLS handshakes by terminal result.", labels: [result], values: [success, rate_limited, timeout, tls_error]}
+  - {name: claude_proxy_authentication_total, type: counter, help: "Total proxy authentication outcomes by terminal result.", labels: [result], values: [challenge, valid, invalid, throttled, map_capacity, store_unavailable]}
+  - {name: claude_proxy_connect_total, type: counter, help: "Total CONNECT setup outcomes by terminal result.", labels: [result], values: [established, malformed_request, port_denied, hostname_denied, address_denied, dns_failed, dial_failed, setup_timeout, credential_store_unavailable, source_bind_unavailable, self_address_state_unavailable, global_capacity, device_capacity, draining, credential_changed, client_disconnected, internal_error]}
+  - {name: claude_proxy_tunnel_closes_total, type: counter, help: "Total established tunnel closes by terminal result.", labels: [result], values: [clean, io_error, idle_timeout, absolute_lifetime, credential_revoked, shutdown_deadline]}
+  - {name: claude_proxy_pac_total, type: counter, help: "Total PAC endpoint outcomes by terminal result.", labels: [result], values: [served, disabled, not_found, prefix_rate_limited, global_rate_limited, map_capacity, capacity]}
+  - {name: claude_proxy_limiter_events_total, type: counter, help: "Total limiter events by limiter and event.", labels: [limiter, event], values: [tls_handshake, authentication, pac, allowed, throttled, entry_expired, map_full, saturation_overflow]}
+  - {name: claude_proxy_reload_total, type: counter, help: "Total runtime reload attempts by kind and result.", labels: [kind, result], values: [credential, certificate, public_self, source_bind, acme, success, failure, recovered]}
+  - {name: claude_proxy_log_records_total, type: counter, help: "Total application log records by delivery result.", labels: [result], values: [written, dropped_queue_full, dropped_sink_failed, dropped_shutdown_deadline]}
+  - {name: claude_proxy_bytes_total, type: counter, help: "Total opaque tunnel bytes by direction.", labels: [direction], values: [client_to_origin, origin_to_client]}
+  - {name: claude_proxy_limiter_entries, type: gauge, help: "Current tracked limiter entries by limiter.", labels: [limiter], values: [tls_handshake, authentication, pac]}
+  - {name: claude_proxy_pre_auth_connections, type: gauge, help: "Current admitted pre-authentication connections.", labels: [], values: []}
+  - {name: claude_proxy_pending_setup_reservations, type: gauge, help: "Current authenticated pending setup reservations.", labels: [], values: []}
+  - {name: claude_proxy_active_tunnels, type: gauge, help: "Current established tunnels.", labels: [], values: []}
+  - {name: claude_proxy_credential_generation, type: gauge, help: "Current installed credential generation, or zero when unavailable.", labels: [], values: []}
+  - {name: claude_proxy_certificate_expiry_seconds, type: gauge, help: "Seconds until the active certificate expires, floored at zero.", labels: [], values: []}
+  - {name: claude_proxy_setup_duration_seconds, type: histogram, help: "CONNECT setup duration in seconds by outcome.", labels: [outcome], values: [success, failure], buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, +Inf]}
+  - {name: claude_proxy_tunnel_duration_seconds, type: histogram, help: "Established tunnel duration in seconds by outcome.", labels: [outcome], values: [clean, error, revoked, idle_timeout, lifetime_timeout, shutdown], buckets: [1, 5, 30, 60, 300, 900, 1800, 3600, 21600, 86400, 604800, +Inf]}
+limiter_pairs: [tls_handshake/allowed, tls_handshake/throttled, tls_handshake/entry_expired, tls_handshake/saturation_overflow, authentication/allowed, authentication/throttled, authentication/entry_expired, authentication/map_full, pac/allowed, pac/throttled, pac/entry_expired, pac/map_full]
+records:
+  base: [timestamp:string:rfc3339nano_utc, level:string:fixed, event:string:closed, reason:string:closed]
+  sensitive: [destination_hostname:string:1..253, device_identifier:string:1..64, source_prefix:string:ipv4_24_or_ipv6_64, duration_ms:uint64, bytes_client_to_origin:uint64, bytes_origin_to_client:uint64]
   max_bytes: 2047
-  sensitive_extension: all_or_none
 matrix:
-  primary_emitter: closed
+  - {id: matrix_01_production_mapped_admission, primary_emitter: admission}
+  - {id: matrix_02_production_overflow_admission, primary_emitter: admission}
+  - {id: matrix_03_production_admission_denied, primary_emitter: admission}
+  - {id: matrix_04_loopback_mapped_or_overflow_admission, primary_emitter: admission}
+  - {id: matrix_05_loopback_admission_denied, primary_emitter: admission}
+  - {id: matrix_06_acme_challenge_handshake_complete, primary_emitter: tls}
+  - {id: matrix_07_no_certificate_nonchallenge_rejected, primary_emitter: tls}
+  - {id: matrix_08_other_production_tls_terminal, primary_emitter: tls}
+  - {id: matrix_09_pre_handler_framework_rejection, primary_emitter: framework}
+  - {id: matrix_10_public_structural_rejection, primary_emitter: public_adapter}
+  - {id: matrix_11_public_version_or_method_rejection, primary_emitter: public_adapter}
+  - {id: matrix_12_pac_disabled_or_not_found, primary_emitter: pac}
+  - {id: matrix_13_pac_rate_denial, primary_emitter: pac}
+  - {id: matrix_14_pac_map_capacity_denial, primary_emitter: pac}
+  - {id: matrix_15_pac_work_capacity_denial, primary_emitter: pac}
+  - {id: matrix_16_pac_admission_success, primary_emitter: pac}
+  - {id: matrix_17_store_unavailable_before_authentication, primary_emitter: authentication}
+  - {id: matrix_18_authorization_absent, primary_emitter: authentication}
+  - {id: matrix_19_invalid_authentication_admitted, primary_emitter: authentication}
+  - {id: matrix_20_invalid_authentication_throttled, primary_emitter: authentication}
+  - {id: matrix_21_invalid_unknown_prefix_map_full, primary_emitter: authentication}
+  - {id: matrix_22_valid_credential, primary_emitter: authentication}
+  - {id: matrix_23_post_valid_malformed_authority, primary_emitter: setup}
+  - {id: matrix_24_other_post_valid_setup_failure, primary_emitter: setup}
+  - {id: matrix_25_pending_to_established, primary_emitter: setup}
+  - {id: matrix_26_post_commit_handoff_failure, primary_emitter: tunnel}
+  - {id: matrix_27_established_tunnel_terminal, primary_emitter: tunnel}
+  - {id: matrix_28_admin_request_silence, primary_emitter: admin}
+  - {id: matrix_29_limiter_entry_expired, primary_emitter: limiter_maintenance}
+  - {id: matrix_30_reload_success, primary_emitter: reload}
+  - {id: matrix_31_reload_failure, primary_emitter: reload}
+  - {id: matrix_32_reload_recovered, primary_emitter: reload}
+  - {id: matrix_33_service_state_transition, primary_emitter: service}
+silence:
+  - {id: silence_01_pre_handler_framework_rejection, primary_emitter: framework}
+  - {id: silence_02_handler_version_or_method_rejection, primary_emitter: public_adapter}
+  - {id: silence_03_acme_challenge_no_request_telemetry, primary_emitter: tls}
+  - {id: silence_04_no_certificate_failure_no_request_telemetry, primary_emitter: tls}
+  - {id: silence_05_admin_per_request, primary_emitter: admin}
+  - {id: silence_06_pac_capacity_no_limiter, primary_emitter: pac}
+  - {id: silence_07_auth_challenge_no_limiter, primary_emitter: authentication}
+  - {id: silence_08_valid_credential_no_auth_limiter, primary_emitter: authentication}
+  - {id: silence_09_unchanged_reload_poll, primary_emitter: reload}
+  - {id: silence_10_reload_success_no_log, primary_emitter: reload}
+  - {id: silence_11_repeated_reload_failure_no_repeat_log, primary_emitter: reload}
+  - {id: silence_12_initial_safe_credential_absence_no_reload_log, primary_emitter: reload}
+reload: [reload_01_unchanged_poll, reload_02_first_failure, reload_03_later_changed_failure, reload_04_first_success_after_failure, reload_05_initial_safe_absence, reload_06_first_publication_after_absence, reload_07_scheduled_public_self_source_bind_acme_attempt]
+lifecycle: [lifecycle_01_initial_startup, lifecycle_02_runtime_credential_loss, lifecycle_03_runtime_credential_recovery, lifecycle_04_initial_absence_first_publication, lifecycle_05_drain, lifecycle_06_orderly_stop, lifecycle_07_fatal_prestart, lifecycle_08_noncredential_failure_readiness, lifecycle_09_noncredential_recovery_readiness]
