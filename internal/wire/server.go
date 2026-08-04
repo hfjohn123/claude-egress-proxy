@@ -24,9 +24,10 @@ func NewServer(handler http.Handler) *http.Server {
 	protocols.SetHTTP1(true)
 	server := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if _, ok := ConnectionOwner(r); ok {
-				handler.ServeHTTP(w, r)
+			if _, ok := ConnectionOwner(r); !ok {
+				panic(http.ErrAbortHandler)
 			}
+			handler.ServeHTTP(w, r)
 		}),
 		ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second,
 		MaxHeaderBytes: 16 << 10, DisableGeneralOptionsHandler: true,

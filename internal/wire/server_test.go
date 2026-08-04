@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -35,3 +36,46 @@ func TestServerHasBoundedHTTP1OwnerBridge(t *testing.T) {
 	}
 	_ = io.Discard
 }
+
+func TestServerAbortsUnownedConnectionWithoutCallingHandler(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	listener := &oneConnListener{conn: server}
+	var calls atomic.Int32
+	s := NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(listener) }()
+	if _, err := io.WriteString(client, "GET / HTTP/1.1\r\nHost: example\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1)
+	if n, err := client.Read(buf); n != 0 || err != io.EOF {
+		t.Fatalf("read %d, %v; want closed without response", n, err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("unowned connection reached supplied handler")
+	}
+	if err := <-done; err == nil {
+		t.Fatal("Serve unexpectedly returned nil")
+	}
+}
+
+type oneConnListener struct {
+	conn net.Conn
+	used bool
+}
+
+func (l *oneConnListener) Accept() (net.Conn, error) {
+	if l.used {
+		return nil, net.ErrClosed
+	}
+	l.used = true
+	return l.conn, nil
+}
+func (l *oneConnListener) Close() error   { return nil }
+func (l *oneConnListener) Addr() net.Addr { return dummyAddr("one") }
+
+type dummyAddr string
+
+func (a dummyAddr) Network() string { return string(a) }
+func (a dummyAddr) String() string  { return string(a) }
