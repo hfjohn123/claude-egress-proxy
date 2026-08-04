@@ -15,7 +15,6 @@ import (
 // set. Its only mutable names are the three generations and the two approved
 // coordination members created while the lock is held.
 type linuxRotationNamespace struct {
-	root       *mutableRoot
 	op         *linuxRoot
 	rootPolicy RootPolicy
 	leaves     [3]string
@@ -50,7 +49,14 @@ func (r *mutableRoot) AcquireRotationNamespace(ctx context.Context, base string,
 	if err := r.lease(); err != nil {
 		return nil, err
 	}
-	fail := func(err error) (RotationNamespace, error) { r.release(); return nil, err }
+	var pinned *linuxRoot
+	fail := func(err error) (RotationNamespace, error) {
+		if pinned != nil {
+			_ = pinned.close()
+		}
+		r.release()
+		return nil, err
+	}
 	op, ok := r.op.(*linuxRoot)
 	if !ok || op.recheck() != nil {
 		return fail(ErrIdentityChanged)
@@ -59,10 +65,14 @@ func (r *mutableRoot) AcquireRotationNamespace(ctx context.Context, base string,
 	if err != nil || linuxCheck(rootStat, Directory, r.policy.Access) != nil {
 		return fail(ErrPermissions)
 	}
+	pinned, err = pinLinuxRotationRoot(op, r.policy)
+	if err != nil {
+		return fail(err)
+	}
 
 	lockPolicy := rotationPolicy(policy, Optional)
 	lockPolicy.MaxBytes = 0
-	lock, created, err := linuxOpenLock(op, base+".lock", lockPolicy)
+	lock, created, err := linuxOpenLock(pinned, base+".lock", lockPolicy)
 	if err != nil {
 		return fail(err)
 	}
@@ -76,7 +86,7 @@ func (r *mutableRoot) AcquireRotationNamespace(ctx context.Context, base string,
 	if err != nil || linuxCheck(lockStat, RegularFile, lockPolicy.Access) != nil || lockStat.Size != 0 {
 		return fail(ErrUnsafePath)
 	}
-	if created && (unix.Fsync(lock) != nil || unix.Fsync(op.fd) != nil) {
+	if created && (unix.Fsync(lock) != nil || unix.Fsync(pinned.fd) != nil) {
 		return fail(ErrUnsafePath)
 	}
 	if err := linuxLockContext(ctx, lock); err != nil {
@@ -88,17 +98,40 @@ func (r *mutableRoot) AcquireRotationNamespace(ctx context.Context, base string,
 			_ = unix.Flock(lock, unix.LOCK_UN)
 		}
 	}()
-	if err := op.recheck(); err != nil {
+	if err := pinned.recheck(); err != nil {
 		return fail(err)
 	}
-	tomb, err := openLinuxRotationFile(op, base+".delete", rotationPolicy(policy, Optional), true)
+	tomb, err := openLinuxRotationFile(pinned, base+".delete", rotationPolicy(policy, Optional), true)
 	if err != nil {
 		return fail(err)
 	}
-	ns := &linuxRotationNamespace{root: r, op: op, rootPolicy: r.policy, leaves: leaves, policy: policy, lock: lock, tomb: tomb}
+	ns := &linuxRotationNamespace{op: pinned, rootPolicy: r.policy, leaves: leaves, policy: policy, lock: lock, tomb: tomb}
 	tomb.ns = ns
 	locked, closeLock = false, false
+	pinned = nil
+	r.release()
 	return ns, nil
+}
+
+func pinLinuxRotationRoot(root *linuxRoot, policy RootPolicy) (*linuxRoot, error) {
+	fd, err := unix.Dup(root.fd)
+	if err != nil {
+		return nil, ErrUnsafePath
+	}
+	unix.CloseOnExec(fd)
+	parentFD, err := unix.Dup(root.parentFD)
+	if err != nil {
+		_ = unix.Close(fd)
+		return nil, ErrUnsafePath
+	}
+	unix.CloseOnExec(parentFD)
+	pinned := &linuxRoot{fd: fd, parentFD: parentFD, leaf: root.leaf, id: root.id}
+	st, statErr := linuxStat(fd)
+	if statErr != nil || linuxIdentity(st) != root.id || linuxCheck(st, Directory, policy.Access) != nil || pinned.recheck() != nil {
+		_ = pinned.close()
+		return nil, ErrIdentityChanged
+	}
+	return pinned, nil
 }
 
 func openLinuxRotationFile(root *linuxRoot, name string, policy FilePolicy, create bool) (*linuxRetainedFile, error) {
@@ -172,7 +205,10 @@ func (n *linuxRotationNamespace) finishClose() {
 	if n.tomb != nil {
 		n.tomb.closeDetached()
 	}
-	n.root.release()
+	if n.op != nil {
+		_ = n.op.close()
+		n.op = nil
+	}
 }
 
 func (n *linuxRotationNamespace) RecheckIdentity() error {

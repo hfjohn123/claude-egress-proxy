@@ -8,6 +8,9 @@ import (
 	"io/fs"
 	"os"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestLinuxRotationNamespaceRotatesPinnedGenerations(t *testing.T) {
@@ -97,5 +100,72 @@ func TestLinuxRotationNamespaceRepairsRetainedTombstone(t *testing.T) {
 	}
 	if size, err := impl.tomb.Size(); err != nil || size != 0 {
 		t.Fatalf("tombstone size = %d, %v; want 0", size, err)
+	}
+}
+
+func TestLinuxMutableRootCloseDoesNotWaitForBlockedNamespaceFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := OpenMutableRoot(dir, RootPolicy{Access: LinuxExactPermissions(uint32(os.Getuid()), fs.FileMode(0o700))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := FilePolicy{Presence: Optional, Kind: RegularFile, Access: LinuxExactPermissions(uint32(os.Getuid()), fs.FileMode(0o600)), MaxBytes: 64}
+	ns, err := root.AcquireRotationNamespace(context.Background(), "state", [3]string{"state", "state.1", "state.2"}, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained, err := ns.Create("state", rotationPolicy(policy, MustBeAbsent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := retained.(*linuxRetainedFile)
+
+	admitted := make(chan struct{})
+	release := make(chan struct{})
+	readDone := make(chan error, 1)
+	go func() {
+		fd, err := f.begin()
+		if err != nil {
+			readDone <- err
+			return
+		}
+		close(admitted)
+		<-release
+		_, err = unix.Pread(fd, make([]byte, 1), 0)
+		f.end()
+		readDone <- err
+	}()
+	<-admitted
+	if err := ns.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rootDone := make(chan error, 1)
+	go func() { rootDone <- root.Close() }()
+	select {
+	case err := <-rootDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		<-readDone
+		<-rootDone
+		t.Fatal("MutableRoot.Close waited for blocked namespace file call")
+	}
+	select {
+	case err := <-readDone:
+		t.Fatalf("blocked retained call finished before release: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-readDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := retained.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
