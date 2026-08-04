@@ -24,6 +24,7 @@ type linuxRotationNamespace struct {
 	tomb       *linuxRetainedFile
 
 	mu       sync.Mutex
+	mutation sync.Mutex
 	closing  bool
 	closed   bool
 	active   int
@@ -182,6 +183,29 @@ func (n *linuxRotationNamespace) RecheckIdentity() error {
 	return n.op.recheck()
 }
 
+// RepairTombstone clears only the identity-pinned discard slot.  The slot is
+// checked as the attached .delete member before its retained descriptor is
+// truncated and synced; it never names a member for mutation.
+func (n *linuxRotationNamespace) RepairTombstone() error {
+	if err := n.begin(); err != nil {
+		return err
+	}
+	defer n.end()
+	n.mutation.Lock()
+	defer n.mutation.Unlock()
+	n.mu.Lock()
+	tomb := n.tomb
+	n.mu.Unlock()
+	if tomb == nil {
+		return ErrIdentityChanged
+	}
+	state, err := n.op.inspect(tomb.name, rotationPolicy(n.policy, Required))
+	if err != nil || !state.Present || state.Identity != tomb.id {
+		return ErrIdentityChanged
+	}
+	return tomb.truncateAndSync(0)
+}
+
 func (n *linuxRotationNamespace) allowed(name string) bool {
 	return name == n.leaves[0] || name == n.leaves[1] || name == n.leaves[2]
 }
@@ -264,6 +288,8 @@ func (n *linuxRotationNamespace) Rotate(leaves [3]string, ids [3]Identity) (Reta
 		return nil, err
 	}
 	defer n.end()
+	n.mutation.Lock()
+	defer n.mutation.Unlock()
 	for i, name := range leaves {
 		state, err := n.op.inspect(name, rotationPolicy(n.policy, Required))
 		if err != nil || !state.Present || state.Identity != ids[i] {
@@ -315,8 +341,11 @@ func (n *linuxRotationNamespace) Rotate(leaves [3]string, ids [3]Identity) (Reta
 		_ = discarded.Close()
 		return nil, err
 	}
-	n.tomb.closeDetached()
+	n.mu.Lock()
+	oldTomb := n.tomb
 	n.tomb = discarded
+	n.mu.Unlock()
+	oldTomb.closeDetached()
 	return active, nil
 }
 
@@ -476,6 +505,27 @@ func (f *linuxRetainedFile) Truncate(size int64) error {
 		return ErrTooLarge
 	}
 	if err := unix.Ftruncate(fd, size); err != nil {
+		return ErrUnsafePath
+	}
+	return nil
+}
+
+func (f *linuxRetainedFile) truncateAndSync(size int64) error {
+	fd, err := f.begin()
+	if err != nil {
+		return err
+	}
+	defer f.end()
+	if err := f.usable(fd); err != nil {
+		return err
+	}
+	if size < 0 || (f.policy.MaxBytes > 0 && size > f.policy.MaxBytes) {
+		return ErrUnsafePath
+	}
+	if err := unix.Ftruncate(fd, size); err != nil {
+		return ErrUnsafePath
+	}
+	if err := unix.Fsync(fd); err != nil {
 		return ErrUnsafePath
 	}
 	return nil

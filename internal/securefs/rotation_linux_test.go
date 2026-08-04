@@ -70,3 +70,32 @@ func TestLinuxRotationNamespaceRotatesPinnedGenerations(t *testing.T) {
 		t.Fatalf("Inspect tombstone error = %v, want ErrUnsafePath", err)
 	}
 }
+
+func TestLinuxRotationNamespaceRepairsRetainedTombstone(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policy := FilePolicy{Presence: Optional, Kind: RegularFile, Access: LinuxExactPermissions(uint32(os.Getuid()), fs.FileMode(0o600)), MaxBytes: 64}
+	root, err := OpenMutableRoot(dir, RootPolicy{Access: LinuxExactPermissions(uint32(os.Getuid()), fs.FileMode(0o700))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	ns, err := root.AcquireRotationNamespace(context.Background(), "state", [3]string{"state", "state.1", "state.2"}, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ns.Close()
+	impl := ns.(*linuxRotationNamespace)
+	if _, err := impl.tomb.WriteAt([]byte("debris"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := ns.RepairTombstone(); err != nil {
+		t.Fatal(err)
+	}
+	if size, err := impl.tomb.Size(); err != nil || size != 0 {
+		t.Fatalf("tombstone size = %d, %v; want 0", size, err)
+	}
+}

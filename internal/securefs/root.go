@@ -102,6 +102,7 @@ type RetainedFile interface {
 // three approved generation leaves.
 type RotationNamespace interface {
 	RecheckIdentity() error
+	RepairTombstone() error
 	Inspect(string, FilePolicy) (FileState, error)
 	ReadFile(string, FilePolicy) ([]byte, FileState, error)
 	Open(string, FilePolicy) (RetainedFile, error)
