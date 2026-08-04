@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +30,7 @@ type Logger struct {
 	capacity  chan struct{}
 	notify    chan struct{}
 	progress  chan struct{}
+	quiescent chan struct{}
 	callDone  chan error
 	done      chan struct{}
 
@@ -56,7 +56,7 @@ func NewLogger(clock timebase.Clock, metrics *Metrics, sink Sink) *Logger {
 	if clock == nil || metrics == nil {
 		panic(loggerInvalid)
 	}
-	l := &Logger{clock: clock, metrics: metrics, sink: sink, capacity: make(chan struct{}, 256), notify: make(chan struct{}, 1), progress: make(chan struct{}, 1), callDone: make(chan error, 1), done: make(chan struct{})}
+	l := &Logger{clock: clock, metrics: metrics, sink: sink, capacity: make(chan struct{}, 256), notify: make(chan struct{}, 1), progress: make(chan struct{}, 1), quiescent: make(chan struct{}, 1), callDone: make(chan error, 1), done: make(chan struct{})}
 	if sink == nil {
 		l.gate.Store(loggerFailed)
 		close(l.done)
@@ -72,7 +72,7 @@ func (l *Logger) Submit(record Record) {
 		panic(ErrInvalidRecord)
 	}
 	l.inFlight.Add(1)
-	defer func() { l.inFlight.Add(^uint32(0)); l.signal(l.notify); l.signal(l.progress) }()
+	defer func() { l.inFlight.Add(^uint32(0)); l.signal(l.notify); l.signal(l.progress); l.signal(l.quiescent) }()
 	if gate := l.gate.Load(); gate != loggerAccepting {
 		l.record(l.gateResult(gate))
 		return
@@ -89,7 +89,7 @@ func (l *Logger) Submit(record Record) {
 		return
 	}
 	ticket := l.tail.Add(1) - 1
-	if hook := l.ticketHook.Load(); hook != nil {
+	if hook := l.ticketHook.Load(); hook != nil && l.ticketHook.CompareAndSwap(hook, nil) {
 		hook.entered <- struct{}{}
 		<-hook.release
 	}
@@ -123,6 +123,16 @@ func (l *Logger) supervise() {
 	var active uint64 = ^uint64(0)
 	var callTimer timebase.Timer
 	var callDeadline time.Time
+	defer func() {
+		if callTimer != nil {
+			callTimer.Stop()
+		}
+		l.stateMu.Lock()
+		if l.shutdownTimer != nil {
+			l.shutdownTimer.Stop()
+		}
+		l.stateMu.Unlock()
+	}()
 	for {
 		gate := l.gate.Load()
 		if gate != loggerAccepting && l.inFlight.Load() == 0 {
@@ -179,24 +189,27 @@ func (l *Logger) supervise() {
 		case <-shutdownC:
 		case <-l.notify:
 		}
+		now := l.clock.Now()
 		l.stateMu.Lock()
-		shutdownExpired := l.shutdown && !l.clock.Now().Before(l.shutdownDeadline)
+		shutdownExpired := l.shutdown && !now.Before(l.shutdownDeadline)
 		l.stateMu.Unlock()
 		if shutdownExpired {
 			l.terminalize(delivery("dropped_shutdown_deadline"), l.waitTail())
 			return
 		}
-		if active != ^uint64(0) && !l.clock.Now().Before(callDeadline) {
+		if active != ^uint64(0) && !now.Before(callDeadline) {
 			l.gate.CompareAndSwap(loggerAccepting, loggerFailed)
 			l.terminalize(delivery("dropped_sink_failed"), l.waitTail())
 			return
 		}
 		if gotCall {
-			if callTimer.Stop() && callResult == nil {
+			if callResult == nil {
+				callTimer.Stop()
 				l.record(delivery("written"))
 				l.terminal.Add(1)
 				<-l.capacity
 				l.signal(l.progress)
+				l.signal(l.quiescent)
 				active = ^uint64(0)
 				continue
 			}
@@ -209,7 +222,7 @@ func (l *Logger) supervise() {
 
 func (l *Logger) waitTail() uint64 {
 	for l.inFlight.Load() != 0 {
-		runtime.Gosched()
+		<-l.progress
 	}
 	return l.tail.Load()
 }
@@ -219,6 +232,7 @@ func (l *Logger) terminalize(result contract.DeliveryResult, tail uint64) {
 	}
 	l.terminal.Store(tail)
 	l.signal(l.progress)
+	l.signal(l.quiescent)
 	l.closeSink()
 }
 func (l *Logger) closeSink() {

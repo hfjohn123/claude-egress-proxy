@@ -104,8 +104,8 @@ func TestLoggerShutdownWaitsForReservedProducerPublication(t *testing.T) {
 	l := NewLogger(clock, m, sink)
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	if err := l.PauseAfterTicketForTest(entered, release); err != nil {
-		t.Fatal(err)
+	if !l.ticketHook.CompareAndSwap(nil, &loggerTicketHook{entered: entered, release: release}) {
+		t.Fatal("ticket hook unavailable")
 	}
 	submitted := make(chan struct{})
 	go func() { l.Submit(Record{json: `{"a":1}`}); close(submitted) }()
@@ -130,6 +130,44 @@ func TestLoggerShutdownWaitsForReservedProducerPublication(t *testing.T) {
 	l.WaitQuiescent()
 	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "dropped_shutdown_deadline"); got != 1 {
 		t.Fatalf("frozen=%v", got)
+	}
+}
+
+func TestLoggerWaitQuiescentSnapshotsTailOnce(t *testing.T) {
+	clock := newManualClock(time.Unix(0, 0))
+	m := loggerMetrics(t)
+	sink := newGateSink()
+	l := NewLogger(clock, m, sink)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	if !l.ticketHook.CompareAndSwap(nil, &loggerTicketHook{entered: entered, release: release}) {
+		t.Fatal("ticket hook unavailable")
+	}
+	firstDone := make(chan struct{})
+	go func() { l.Submit(Record{json: `{"first":true}`}); close(firstDone) }()
+	<-entered
+	quiescent := make(chan struct{})
+	go func() { l.WaitQuiescent(); close(quiescent) }()
+	close(release)
+	<-firstDone
+	<-sink.started
+	sink.unblock()
+	<-quiescent
+
+	// Hook was one-shot. This later submission must not join the old snapshot.
+	l.Submit(Record{json: `{"later":true}`})
+	l.WaitQuiescent()
+}
+
+func TestLoggerSourceHasNoBusyTailSpin(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	b, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if strings.Contains(s, "runtime.Gosched") {
+		t.Fatal("busy tail spin")
 	}
 }
 
@@ -243,6 +281,64 @@ func TestLoggerShutdownDeadlineWinsExactTie(t *testing.T) {
 	<-done
 	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "dropped_shutdown_deadline"); got != 2 {
 		t.Fatalf("shutdown=%v", got)
+	}
+	if sink.closeCalls() != 1 {
+		t.Fatalf("closes=%d", sink.closeCalls())
+	}
+}
+
+func TestLoggerShutdownDeadlineDropsActiveAndQueuedInFIFO(t *testing.T) {
+	clock := newManualClock(time.Unix(0, 0))
+	m := loggerMetrics(t)
+	sink := newScriptedSink()
+	l := NewLogger(clock, m, sink)
+	for i := 0; i < 255; i++ {
+		l.Submit(Record{json: `{"n":1}`})
+	}
+	<-sink.started
+	<-clock.created // first call timer
+	shutdown := make(chan struct{})
+	go func() { l.Shutdown(context.Background()); close(shutdown) }()
+	<-clock.created // shutdown timer
+	// The shutdown gate is closed: this final record is the FIFO-last drop.
+	l.Submit(Record{json: `{"stopped":true}`})
+	for i := 0; i < 4; i++ {
+		clock.Advance(249 * time.Millisecond)
+		sink.result <- nil
+		<-sink.started
+	}
+	clock.Advance(4 * time.Millisecond)
+	l.WaitQuiescent()
+	<-shutdown
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "written"); got != 4 {
+		t.Fatalf("written=%v", got)
+	}
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "dropped_shutdown_deadline"); got != 252 {
+		t.Fatalf("shutdown=%v", got)
+	}
+	if sink.calls() != 5 || sink.closeCalls() != 1 {
+		t.Fatalf("calls=%d closes=%d", sink.calls(), sink.closeCalls())
+	}
+}
+
+func TestLoggerCanceledShutdownKeepsDraining(t *testing.T) {
+	clock := newManualClock(time.Unix(0, 0))
+	m := loggerMetrics(t)
+	sink := newScriptedSink()
+	l := NewLogger(clock, m, sink)
+	l.Submit(Record{json: `{"a":1}`})
+	<-sink.started
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { l.Shutdown(ctx); close(done) }()
+	<-clock.created
+	cancel()
+	<-done
+	clock.Advance(249 * time.Millisecond)
+	sink.result <- nil
+	l.WaitQuiescent()
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "written"); got != 1 {
+		t.Fatalf("written=%v", got)
 	}
 	if sink.closeCalls() != 1 {
 		t.Fatalf("closes=%d", sink.closeCalls())
