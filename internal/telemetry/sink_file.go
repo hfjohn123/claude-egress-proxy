@@ -51,6 +51,9 @@ func ValidateFileSink(ctx context.Context, root securefs.Root, base string, poli
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := rejectFourthGeneration(root, base, policy); err != nil {
+		return invalidFileSink(err)
+	}
 	if mode == CheckOnly {
 		before, err := takeFileSinkSnapshot(root, base, policy)
 		if err != nil {
@@ -92,6 +95,17 @@ func ValidateFileSink(ctx context.Context, root securefs.Root, base string, poli
 	return validateAndRepairNamespace(ns, base, policy)
 }
 
+func rejectFourthGeneration(r fileReader, base string, policy securefs.FilePolicy) error {
+	state, err := r.Inspect(base+".3", optionalFilePolicy(policy))
+	if err != nil {
+		return err
+	}
+	if state.Present {
+		return securefs.ErrUnsafePath
+	}
+	return nil
+}
+
 func checkOnlyTombstone(r fileReader, base string, policy securefs.FilePolicy) (bool, error) {
 	state, err := r.Inspect(base+".delete", optionalFilePolicy(policy))
 	if err != nil || !state.Present {
@@ -114,6 +128,9 @@ func OpenFileSink(ctx context.Context, root securefs.MutableRoot, base string, p
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if err := rejectFourthGeneration(root, base, policy); err != nil {
+		return nil, invalidFileSink(err)
 	}
 	ns, err := root.AcquireRotationNamespace(ctx, base, fileSinkLeaves(base), policy)
 	if err != nil {

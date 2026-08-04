@@ -95,6 +95,31 @@ undefined in the focused retained-tombstone test.
 - `GOOS=linux GOARCH=amd64 go test -c -o $env:TEMP\\securefs-linux-task9-green.test ./internal/securefs`: PASS.
 - `GOOS=windows GOARCH=amd64 go test -c -o $env:TEMP\\securefs-windows-task9-api.test.exe ./internal/securefs`: PASS.
 
+## Telemetry file-sink deterministic oracle and fault matrix
+
+### RED
+
+- The first deterministic oracle fixture failed because it could not form a
+  valid 511-byte canonical record; the corrected host-label generator supplied
+  a 512-byte (including LF), distinguishable record.
+- `TestValidateFileSinkRejectsFourthGeneration` then failed as expected:
+  CheckOnly accepted `events.3`, demonstrating the missing forbidden-member
+  check.
+
+### GREEN / verification
+
+- Added a test-only `MutableRoot`/`RotationNamespace`/`RetainedFile` harness
+  with stable zero identities and injected validation, close, rotate/delete/
+  rename, create, truncate, partial-write, and write failures.
+- The oracle proves no rotation at 20,480 records, pre-write rotation at
+  20,481, and active/`.1`/`.2` ordering plus deletion through record 61,441.
+- Added startup presence, active-tail/no-LF, corrupt backup, member/30 MiB
+  boundary, tombstone repair, CheckOnly, and Close-detach coverage.
+- Added production rejection of an observable `base.3` member before CheckOnly,
+  repair, or Open proceeds.
+- `go test ./internal/telemetry -run 'Test(FileSinkRotationOracle512BytesThrough61441Records|ValidateFileSink|OpenFileSinkRepairsOnlyCanonicalTailAndTombstone|FileSinkFaults)' -count=1 -v`: PASS.
+- `go vet ./internal/telemetry`: PASS.
+
 ## Windows Event Log sink
 
 ### RED
