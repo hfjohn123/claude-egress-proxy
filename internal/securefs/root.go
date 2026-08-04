@@ -85,6 +85,31 @@ type Root interface {
 	Close() error
 }
 
+// RetainedFile is an identity-pinned regular file held by a rotation
+// namespace.  It deliberately exposes only offset I/O so callers cannot
+// accidentally retain a pathname-dependent file object.
+type RetainedFile interface {
+	Identity() Identity
+	RecheckIdentity() error
+	Size() (int64, error)
+	ReadAt([]byte, int64) (int, error)
+	WriteAt([]byte, int64) (int, error)
+	Truncate(int64) error
+	Close() error
+}
+
+// RotationNamespace holds the per-log OS lock and restricts mutations to the
+// three approved generation leaves.
+type RotationNamespace interface {
+	RecheckIdentity() error
+	Inspect(string, FilePolicy) (FileState, error)
+	ReadFile(string, FilePolicy) ([]byte, FileState, error)
+	Open(string, FilePolicy) (RetainedFile, error)
+	Create(string, FilePolicy) (RetainedFile, error)
+	Rotate([3]string, [3]Identity) (RetainedFile, error)
+	Close() error
+}
+
 type CreateCapableRoot interface {
 	Root
 	createCapability()
@@ -96,6 +121,7 @@ type CreateCapableRoot interface {
 type MutableRoot interface {
 	Root
 	WithExclusiveLock(context.Context, string, FilePolicy, func(LockedFile) error) error
+	AcquireRotationNamespace(context.Context, string, [3]string, FilePolicy) (RotationNamespace, error)
 }
 
 type permissionKind uint8
