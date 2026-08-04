@@ -99,3 +99,17 @@ RED: first focused run exposed parser defects (tuple delimiter and nil/empty lab
 GREEN: added `descriptor_registry_test.go`. It parses hand-authored `testdata/descriptors.golden`, requires exactly 17 families, and compares fresh private gather output for exact family membership, type, HELP, zero-valued closed tuples, valid histogram finite buckets and zero `+Inf` count mechanics. It independently locks generated ordered labels/allowed values against golden, checks every valid limiter pair exists and invalid cross-product pair is absent, snapshots default gatherer names before/after private Metrics construction/gather, rejects extra/raw-string exported Metrics methods, and proves certificate callback/clock each run once per gather with floor, expiry clamp, absent callback snapshot, and mutable-clock decay. Generator test proves `descriptors.golden` remains hand-authored.
 
 Verification: `go fmt ./...`; `go generate ./internal/telemetry`; `go run ./internal/tools/telemetrygen -check`; `go mod download`; `go mod verify`; `go test ./...`; `go vet ./...`; `go list -m all`; `git diff --check` all pass.
+
+## Exhaustive Metrics typed-contract slice
+
+RED command: `go test ./internal/telemetry -run TestMetricsUsesOneCollectorForRelatedStateGauges -v`.
+
+Expected RED observed: `m.stateMetrics undefined`; the new deterministic contract test required one collector to load one immutable state snapshot for all related gauges.
+
+GREEN: added `metrics_contract_test.go`, exhaustively invoking every closed typed Metrics mutator and checking its exact labelled series, counter or histogram change. It rejects invalid enum values, every invalid limiter pair and invalid limiter/event cross-product, negative durations, mismatched close/outcome values, and byte/state totals above `2^53-1` before any metric mutation. It also checks both byte directions including zero and the exact maximum, state copy-on-publish, and each state field's atomic rejection. `stateCollector` now snapshots `m.state` once per scrape before emitting all seven state gauges.
+
+Focused GREEN command: `go test ./internal/telemetry -run 'Test(MetricsTypedMutatorsExhaustClosedValues|MetricsRejectInvalidClosedValuesBeforeMutation|FinishTunnelExactMappingBoundariesAndAtomicRejection|PublishStateCopiesExactValuesAndRejectsOverLimitAtomically|MetricsUsesOneCollectorForRelatedStateGauges)' -v`.
+
+Result: passed.
+
+Final verification: `go fmt ./...`, `go generate ./internal/telemetry`, `go run ./internal/tools/telemetrygen -check`, `go mod download`, `go mod verify`, `go test ./...`, `go vet ./...`, `go list -m all`, and `git diff --check` passed. `go test -race ./internal/telemetry -v` could not run: `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`.

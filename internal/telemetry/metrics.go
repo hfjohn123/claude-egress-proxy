@@ -20,6 +20,7 @@ type Metrics struct {
 	clock                                                             timebase.Clock
 	certificateNotAfter                                               func() (time.Time, bool)
 	state                                                             atomic.Pointer[StateSnapshot]
+	stateMetrics                                                      prometheus.Collector
 	tls, auth, connect, closes, pac, limiter, reload, delivery, bytes *prometheus.CounterVec
 	setup, tunnel                                                     *prometheus.HistogramVec
 }
@@ -30,6 +31,13 @@ func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, 
 	}
 	m := &Metrics{registry: prometheus.NewPedanticRegistry(), clock: clock, certificateNotAfter: cert}
 	m.state.Store(&StateSnapshot{})
+	m.stateMetrics = &stateCollector{metrics: m,
+		limiterEntries:       prometheus.NewDesc("claude_proxy_limiter_entries", "Current tracked limiter entries by limiter.", []string{"limiter"}, nil),
+		preAuth:              prometheus.NewDesc("claude_proxy_pre_auth_connections", "Current admitted pre-authentication connections.", nil, nil),
+		pendingSetup:         prometheus.NewDesc("claude_proxy_pending_setup_reservations", "Current authenticated pending setup reservations.", nil, nil),
+		activeTunnels:        prometheus.NewDesc("claude_proxy_active_tunnels", "Current established tunnels.", nil, nil),
+		credentialGeneration: prometheus.NewDesc("claude_proxy_credential_generation", "Current installed credential generation, or zero when unavailable.", nil, nil),
+	}
 	m.tls = cv("claude_proxy_tls_handshakes_total")
 	m.auth = cv("claude_proxy_authentication_total")
 	m.connect = cv("claude_proxy_connect_total")
@@ -45,6 +53,9 @@ func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, 
 		if err := m.registry.Register(c); err != nil {
 			return nil, ErrInvalidMetrics
 		}
+	}
+	if err := m.registry.Register(m.stateMetrics); err != nil {
+		return nil, ErrInvalidMetrics
 	}
 	for _, v := range contract.AllTLSResults() {
 		m.tls.WithLabelValues(v)
@@ -85,7 +96,7 @@ func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, 
 			}
 		}
 	}
-	for name, fn := range map[string]func() float64{"claude_proxy_limiter_entries": func() float64 { s := m.state.Load(); return float64(s.TLSHandshakeLimiterEntries) }, "claude_proxy_pre_auth_connections": func() float64 { return float64(m.state.Load().PreAuthConnections) }, "claude_proxy_pending_setup_reservations": func() float64 { return float64(m.state.Load().PendingSetupReservations) }, "claude_proxy_active_tunnels": func() float64 { return float64(m.state.Load().ActiveTunnels) }, "claude_proxy_credential_generation": func() float64 { return float64(m.state.Load().CredentialGeneration) }, "claude_proxy_certificate_expiry_seconds": func() float64 {
+	for name, fn := range map[string]func() float64{"claude_proxy_certificate_expiry_seconds": func() float64 {
 		n, ok := m.certificateNotAfter()
 		if !ok {
 			return 0
@@ -96,26 +107,33 @@ func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, 
 		}
 		return math.Floor(d.Seconds())
 	}} {
-		if name == "claude_proxy_limiter_entries" {
-			for l, f := range map[string]func() float64{"tls_handshake": func() float64 { return float64(m.state.Load().TLSHandshakeLimiterEntries) }, "authentication": func() float64 { return float64(m.state.Load().AuthenticationLimiterEntries) }, "pac": func() float64 { return float64(m.state.Load().PACLimiterEntries) }} {
-				m.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: "Current tracked limiter entries by limiter.", ConstLabels: prometheus.Labels{"limiter": l}}, f))
-			}
-			continue
-		}
-		help := "Current established tunnels."
-		switch name {
-		case "claude_proxy_pre_auth_connections":
-			help = "Current admitted pre-authentication connections."
-		case "claude_proxy_pending_setup_reservations":
-			help = "Current authenticated pending setup reservations."
-		case "claude_proxy_credential_generation":
-			help = "Current installed credential generation, or zero when unavailable."
-		case "claude_proxy_certificate_expiry_seconds":
-			help = "Seconds until the active certificate expires, floored at zero."
-		}
-		m.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: help}, fn))
+		m.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: "Seconds until the active certificate expires, floored at zero."}, fn))
 	}
 	return m, nil
+}
+
+type stateCollector struct {
+	metrics                                                                    *Metrics
+	limiterEntries, preAuth, pendingSetup, activeTunnels, credentialGeneration *prometheus.Desc
+}
+
+func (c *stateCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.limiterEntries
+	ch <- c.preAuth
+	ch <- c.pendingSetup
+	ch <- c.activeTunnels
+	ch <- c.credentialGeneration
+}
+
+func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
+	s := c.metrics.state.Load()
+	ch <- prometheus.MustNewConstMetric(c.limiterEntries, prometheus.GaugeValue, float64(s.TLSHandshakeLimiterEntries), "tls_handshake")
+	ch <- prometheus.MustNewConstMetric(c.limiterEntries, prometheus.GaugeValue, float64(s.AuthenticationLimiterEntries), "authentication")
+	ch <- prometheus.MustNewConstMetric(c.limiterEntries, prometheus.GaugeValue, float64(s.PACLimiterEntries), "pac")
+	ch <- prometheus.MustNewConstMetric(c.preAuth, prometheus.GaugeValue, float64(s.PreAuthConnections))
+	ch <- prometheus.MustNewConstMetric(c.pendingSetup, prometheus.GaugeValue, float64(s.PendingSetupReservations))
+	ch <- prometheus.MustNewConstMetric(c.activeTunnels, prometheus.GaugeValue, float64(s.ActiveTunnels))
+	ch <- prometheus.MustNewConstMetric(c.credentialGeneration, prometheus.GaugeValue, float64(s.CredentialGeneration))
 }
 func metricDefinition(name string) MetricDefinition {
 	for _, definition := range MetricDefinitions {
