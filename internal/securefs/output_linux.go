@@ -13,8 +13,11 @@ import (
 
 func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy RootPolicy, target string, data []byte, policy FilePolicy) (CommitBoundary, error) {
 	r, ok := op.(*linuxRoot)
-	if !ok || linuxOutputRoot(r, rootPolicy) != nil {
+	if !ok {
 		return CommitBoundary{}, ErrUnsafePath
+	}
+	if err := linuxOutputRoot(r, rootPolicy); err != nil {
+		return CommitBoundary{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return CommitBoundary{}, err
@@ -40,13 +43,7 @@ func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy Root
 		return CommitBoundary{}, ErrUnsafePath
 	}
 	var tempID Identity
-	keep := true
-	defer func() {
-		_ = unix.Close(fd)
-		if keep {
-			linuxDeleteOwnedTemp(r, rootPolicy, temp, tempID, policy)
-		}
-	}()
+	defer func() { _ = unix.Close(fd) }()
 	st, e := linuxStat(fd)
 	if e == nil {
 		tempID = linuxIdentity(st)
@@ -74,6 +71,13 @@ func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy Root
 	if inspectErr != nil || now.Present != current.Present || now.Present && now.Identity != current.Identity {
 		return CommitBoundary{}, ErrIdentityChanged
 	}
+	// renameat is pathname-based. The retained descriptor establishes the
+	// intended identity; this is the final attachment check before mutation.
+	// Failed writes leave the random temp name: check-then-unlink cleanup could
+	// delete a subsequently swapped file.
+	if err := linuxOutputCommitHook(ctx); err != nil || !linuxTempPathCurrent(r.fd, temp, tempID, policy) {
+		return CommitBoundary{}, ErrIdentityChanged
+	}
 	if current.Present {
 		err = unix.Renameat(r.fd, temp, r.fd, target)
 	} else {
@@ -85,7 +89,6 @@ func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy Root
 		}
 		return CommitBoundary{}, ErrUnsafePath
 	}
-	keep = false
 	if unix.Fsync(r.fd) != nil {
 		return CommitBoundary{NamespacePublished: true}, ErrUnsafePath
 	}
@@ -106,13 +109,7 @@ func linuxTempCurrent(fd int, id Identity, policy FilePolicy) bool {
 	st, err := linuxStat(fd)
 	return err == nil && linuxIdentity(st) == id && linuxCheck(st, RegularFile, policy.Access) == nil
 }
-func linuxDeleteOwnedTemp(r *linuxRoot, rootPolicy RootPolicy, name string, id Identity, policy FilePolicy) {
-	if linuxOutputRoot(r, rootPolicy) != nil {
-		return
-	}
+func linuxTempPathCurrent(rootFD int, name string, id Identity, policy FilePolicy) bool {
 	var st unix.Stat_t
-	if unix.Fstatat(r.fd, name, &st, unix.AT_SYMLINK_NOFOLLOW) != nil || linuxIdentity(st) != id || linuxCheck(st, RegularFile, policy.Access) != nil {
-		return
-	}
-	_ = unix.Unlinkat(r.fd, name, 0)
+	return unix.Fstatat(rootFD, name, &st, unix.AT_SYMLINK_NOFOLLOW) == nil && linuxIdentity(st) == id && linuxCheck(st, RegularFile, policy.Access) == nil
 }

@@ -7,16 +7,17 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"path/filepath"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy RootPolicy, target string, data []byte, policy FilePolicy) (CommitBoundary, error) {
 	r, ok := op.(*windowsRoot)
-	if !ok || winOutputRoot(r, rootPolicy) != nil {
+	if !ok {
 		return CommitBoundary{}, ErrUnsafePath
+	}
+	if err := winOutputRoot(r, rootPolicy); err != nil {
+		return CommitBoundary{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return CommitBoundary{}, err
@@ -59,10 +60,6 @@ func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy Root
 	if err := windows.FlushFileBuffers(h); err != nil {
 		return CommitBoundary{}, ErrUnsafePath
 	}
-	if err := windows.CloseHandle(h); err != nil {
-		return CommitBoundary{}, ErrUnsafePath
-	}
-	h = 0
 	if err := ctx.Err(); err != nil {
 		return CommitBoundary{}, err
 	}
@@ -73,17 +70,18 @@ func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy Root
 	if inspectErr != nil || now.Present != state.Present || now.Present && now.Identity != state.Identity {
 		return CommitBoundary{}, ErrIdentityChanged
 	}
-	tempPath, targetPath := filepath.Join(r.path, temp), filepath.Join(r.path, target)
-	a, _ := windows.UTF16PtrFromString(tempPath)
-	b, _ := windows.UTF16PtrFromString(targetPath)
-	if state.Present {
-		proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
-		result, _, _ := proc.Call(uintptr(unsafe.Pointer(b)), uintptr(unsafe.Pointer(a)), 0, 0, 0, 0)
-		if result == 0 {
-			return CommitBoundary{}, ErrUnsafePath
-		}
-	} else if err := windows.MoveFileEx(a, b, windows.MOVEFILE_WRITE_THROUGH); err != nil {
-		if errors.Is(err, windows.ERROR_FILE_EXISTS) {
+	// The commit is handle-based: the retained, validated temp handle is moved
+	// into the directory namespace, never whichever object happens to occupy the
+	// temp pathname. The final path checks are deliberately adjacent to it.
+	if err := winOutputCommitHook(ctx); err != nil || !winTempCurrent(r, temp, id, policy) {
+		return CommitBoundary{}, ErrIdentityChanged
+	}
+	now, inspectErr = r.inspect(target, FilePolicy{Presence: Optional, Kind: RegularFile, Access: policy.Access, MaxBytes: policy.MaxBytes})
+	if inspectErr != nil || now.Present != state.Present || now.Present && now.Identity != state.Identity {
+		return CommitBoundary{}, ErrIdentityChanged
+	}
+	if err := winRenameHandle(h, r.fd, target, state.Present); err != nil {
+		if errors.Is(err, windows.STATUS_OBJECT_NAME_COLLISION) {
 			return CommitBoundary{}, ErrAlreadyExists
 		}
 		return CommitBoundary{}, ErrUnsafePath
@@ -92,13 +90,7 @@ func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy Root
 	if err := ctx.Err(); err != nil {
 		return CommitBoundary{NamespacePublished: true}, err
 	}
-	targetHandle, err := winOpenState(r.fd, target, false, policy)
-	if err != nil {
-		return CommitBoundary{NamespacePublished: true}, ErrUnsafePath
-	}
-	err = windows.FlushFileBuffers(targetHandle)
-	_ = windows.CloseHandle(targetHandle)
-	if err != nil {
+	if err := windows.FlushFileBuffers(h); err != nil {
 		return CommitBoundary{NamespacePublished: true}, ErrUnsafePath
 	}
 	return CommitBoundary{NamespacePublished: true, TargetDurable: true}, nil

@@ -63,12 +63,37 @@ func TestParseManifestRejectsAliasesTagsAndNoncanonicalRules(t *testing.T) {
 		"union order": func(s string) string {
 			return strings.Replace(s, "union: [code, web-desktop]", "union: [web-desktop, code]", 1)
 		},
+		"quoted format version": func(s string) string { return strings.Replace(s, "format_version: 1", "format_version: \"1\"", 1) },
+		"integer metadata": func(s string) string {
+			return strings.Replace(s, "documentation_date: \"2026-08-02\"", "documentation_date: 1", 1)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseManifest([]byte(mutate(validManifest))); err == nil {
 				t.Fatal("accepted invalid manifest")
 			}
 		})
+	}
+}
+
+func TestGeneratedDocsRenderManifestMetadataAndProfiles(t *testing.T) {
+	m, err := parseManifest([]byte(validManifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs := string(renderDocs(m))
+	for _, want := range []string{"https://code.claude.com/docs/en/corporate-proxy", "2026-08-02", "golang.org/x/net v0.57.0", "api.anthropic.com", "claudeusercontent.com"} {
+		if !strings.Contains(docs, want) {
+			t.Fatalf("docs missing %q: %s", want, docs)
+		}
+	}
+	changed := strings.Replace(validManifest, "api.anthropic.com", "api2.anthropic.com", 1)
+	m2, err := parseManifest([]byte(changed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(renderGo(m)) == string(renderGo(m2)) || string(renderDocs(m)) == string(renderDocs(m2)) {
+		t.Fatal("manifest host did not change both generated artifacts")
 	}
 }
 

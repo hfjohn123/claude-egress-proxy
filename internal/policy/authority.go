@@ -73,10 +73,9 @@ func splitAuthority(s string) (string, string, bool, bool) {
 			return "", "", false, false
 		}
 		h := s[1:i]
-		_, e := netip.ParseAddr(h)
+		a, e := netip.ParseAddr(h)
 		if e == nil {
-			a, _ := netip.ParseAddr(h)
-			if a.Is4() {
+			if a.Is4() || a.String() != h {
 				return "", "", false, false
 			}
 		}

@@ -21,7 +21,11 @@ import (
 var outputPaths = []string{"internal/policy/generated_profiles.go", "docs/reference/profiles.md"}
 
 type profile struct{ exact, suffixes []string }
-type manifest struct{ code, web, all profile }
+type manifest struct {
+	sourceURL, documentationDate            string
+	publicSuffixModule, publicSuffixVersion string
+	code, web, all                          profile
+}
 
 func main() {
 	check := flag.Bool("check", false, "check generated files")
@@ -110,7 +114,7 @@ func parseManifest(b []byte) (manifest, error) {
 	if err != nil {
 		return manifest{}, err
 	}
-	if scalar(top["format_version"], "1") != nil || scalar(top["source_url"], "https://code.claude.com/docs/en/corporate-proxy") != nil || scalar(top["documentation_date"], "2026-08-02") != nil || scalar(top["public_suffix_module"], "golang.org/x/net") != nil || scalar(top["public_suffix_version"], "v0.57.0") != nil {
+	if scalar(top["format_version"], "1", "!!int") != nil || scalar(top["source_url"], "https://code.claude.com/docs/en/corporate-proxy", "!!str") != nil || scalar(top["documentation_date"], "2026-08-02", "!!str") != nil || scalar(top["public_suffix_module"], "golang.org/x/net", "!!str") != nil || scalar(top["public_suffix_version"], "v0.57.0", "!!str") != nil {
 		return manifest{}, errors.New("manifest metadata is not canonical")
 	}
 	profiles, err := mapping(top["profiles"], []string{"code", "web-desktop", "all"})
@@ -132,7 +136,7 @@ func parseManifest(b []byte) (manifest, error) {
 	if !sequenceEqual(all["union"], []string{"code", "web-desktop"}) {
 		return manifest{}, errors.New("all union is not canonical")
 	}
-	return manifest{code: code, web: web, all: profile{exact: union(code.exact, web.exact), suffixes: union(code.suffixes, web.suffixes)}}, nil
+	return manifest{sourceURL: top["source_url"].Value, documentationDate: top["documentation_date"].Value, publicSuffixModule: top["public_suffix_module"].Value, publicSuffixVersion: top["public_suffix_version"].Value, code: code, web: web, all: profile{exact: union(code.exact, web.exact), suffixes: union(code.suffixes, web.suffixes)}}, nil
 }
 
 func badNode(n *yaml.Node) bool {
@@ -160,8 +164,8 @@ func mapping(n *yaml.Node, keys []string) (map[string]*yaml.Node, error) {
 	}
 	return out, nil
 }
-func scalar(n *yaml.Node, want string) error {
-	if n == nil || n.Kind != yaml.ScalarNode || n.Value != want || (n.Tag != "!!str" && n.Tag != "!!int") {
+func scalar(n *yaml.Node, want, tag string) error {
+	if n == nil || n.Kind != yaml.ScalarNode || n.Value != want || n.Tag != tag {
 		return errors.New("invalid scalar")
 	}
 	return nil
@@ -171,7 +175,7 @@ func sequenceEqual(n *yaml.Node, want []string) bool {
 		return false
 	}
 	for i, s := range want {
-		if scalar(n.Content[i], s) != nil {
+		if scalar(n.Content[i], s, "!!str") != nil {
 			return false
 		}
 	}
@@ -198,7 +202,7 @@ func hostList(n *yaml.Node, suffix bool) ([]string, error) {
 	}
 	out := make([]string, len(n.Content))
 	for i, v := range n.Content {
-		if scalar(v, v.Value) != nil {
+		if scalar(v, v.Value, "!!str") != nil {
 			return nil, errors.New("non-string host")
 		}
 		normalized, err := policy.NormalizeHostname(v.Value)
@@ -260,5 +264,16 @@ func renderGo(m manifest) []byte {
 	return out
 }
 func renderDocs(m manifest) []byte {
-	return []byte("# Destination profiles\n\nGenerated from `policy/profiles.yaml`. `code` permits the frozen Claude Code hosts. `web-desktop` adds browser/Desktop artifacts through the `claudeusercontent.com` suffix. `all` is their union.\n")
+	var out bytes.Buffer
+	out.WriteString("# Destination profiles\n\n")
+	out.WriteString("Generated from `policy/profiles.yaml`. Source: `" + m.sourceURL + "` (documentation date `" + m.documentationDate + "`). Public Suffix List module: `" + m.publicSuffixModule + " " + m.publicSuffixVersion + "`.\n\n")
+	for _, p := range []struct {
+		name  string
+		rules profile
+	}{{"code", m.code}, {"web-desktop", m.web}, {"all", m.all}} {
+		out.WriteString("## `" + p.name + "`\n\n| Rule | Values |\n| --- | --- |\n")
+		out.WriteString("| exact hosts | " + join(p.rules.exact, "<br>") + " |\n")
+		out.WriteString("| suffixes | " + join(p.rules.suffixes, "<br>") + " |\n\n")
+	}
+	return append(bytes.TrimRight(out.Bytes(), "\n"), '\n')
 }

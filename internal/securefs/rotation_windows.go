@@ -389,7 +389,7 @@ func (n *windowsRotationNamespace) Rotate(leaves [3]string, ids [3]Identity) (Re
 		_ = second.Close()
 		return nil, ErrIdentityChanged
 	}
-	if err := winRenameHandle(second.fd, n.op.fd, leaves[2]); err != nil {
+	if err := winRenameHandle(second.fd, n.op.fd, leaves[2], false); err != nil {
 		_ = second.Close()
 		return nil, err
 	}
@@ -402,7 +402,7 @@ func (n *windowsRotationNamespace) Rotate(leaves [3]string, ids [3]Identity) (Re
 		_ = active.Close()
 		return nil, ErrIdentityChanged
 	}
-	if err := winRenameHandle(active.fd, n.op.fd, leaves[1]); err != nil {
+	if err := winRenameHandle(active.fd, n.op.fd, leaves[1], false); err != nil {
 		_ = active.Close()
 		return nil, err
 	}
@@ -623,7 +623,7 @@ type winRotationRenameInformation struct {
 	FileName        [1]uint16
 }
 
-func winRenameHandle(h, parent windows.Handle, name string) error {
+func winRenameHandle(h, parent windows.Handle, name string, replace bool) error {
 	u, err := windows.UTF16FromString(name)
 	if err != nil {
 		return ErrUnsafePath
@@ -632,6 +632,9 @@ func winRenameHandle(h, parent windows.Handle, name string) error {
 	n := len(u) - 1
 	buf := make([]byte, int(unsafe.Offsetof(zero.FileName))+n*2)
 	info := (*winRotationRenameInformation)(unsafe.Pointer(&buf[0]))
+	if replace {
+		info.ReplaceIfExists = 1
+	}
 	info.RootDirectory = parent
 	info.FileNameLength = uint32(n * 2)
 	copy((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&info.FileName[0]))[:n:n], u[:n])
