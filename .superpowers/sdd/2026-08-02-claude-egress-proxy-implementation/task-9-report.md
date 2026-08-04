@@ -152,3 +152,32 @@ undefined.
 - `go test -tags=cep_testcontrol ./internal/telemetry -run TestEventLog -v`: PASS.
 - `GOOS=linux GOARCH=amd64 go test -c ./internal/telemetry`: PASS.
 - `go test ./...`, `go vet ./...`, `go mod verify`: PASS.
+
+## Task 9 final review fix and verification
+
+- Windows rotation now rechecks every reopened generation handle against the
+  supplied identity immediately before delete or rename.
+- Linux and Windows rotation namespaces duplicate and own independent root
+  capabilities. Closing the original mutable root no longer waits for an
+  abandoned namespace file call, while the admitted call keeps its namespace
+  handles valid until it returns.
+- Check-only snapshots include forbidden `.3` absence, file-sink policies must
+  use a platform-restricted permission model, and active-tail repair implements
+  the exact 2,047-byte repairable / 2,048-byte invalid boundary.
+- Event Log close detaches before a blocked report finishes, and the generated
+  message resource uses `%1%0` so Windows adds no trailing CRLF.
+- Native Linux securefs and Task 9 file-telemetry tests executed through WSL and
+  passed. The first full securefs run exposed a pre-existing Task 5 test
+  expectation that treated Windows `MOVEFILE_WRITE_THROUGH` durability as
+  universal; the test now expects absent-target durability at
+  `AfterPublication` only on Windows, matching the Linux
+  target-plus-parent-fsync sequence and the implementation plan.
+- The full cross-compiled Linux telemetry binary cannot run its older
+  source-inspection tests from this Windows checkout because their compile-time
+  paths use Windows syntax; those tests pass in the native Windows full suite.
+- Scoped re-review of `8e66e5e..7842bc7`: seven prior findings addressed,
+  zero open, and no new Critical or Important findings.
+- Scoped re-review of the WSL-discovered test correction
+  `7842bc7..3831767`: clean; no production defect masked.
+- Windows race testing remains unavailable on this host because CGO is disabled
+  by default and no `gcc` compiler is installed.
