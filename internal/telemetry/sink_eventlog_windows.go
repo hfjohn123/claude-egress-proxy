@@ -50,25 +50,34 @@ func (s *eventLogSink) WriteRecord(raw []byte) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.failed != nil {
-		return s.failed
+		err := s.failed
+		s.mu.Unlock()
+		return err
 	}
 	if s.closed || s.log == nil {
+		s.mu.Unlock()
 		return ErrInvalidSink
 	}
+	log := s.log
+	s.mu.Unlock()
 	var err error
 	switch record.Level {
 	case "info":
-		err = s.log.Info(1, string(raw))
+		err = log.Info(1, string(raw))
 	case "warn":
-		err = s.log.Warning(1, string(raw))
+		err = log.Warning(1, string(raw))
 	case "error":
-		err = s.log.Error(1, string(raw))
+		err = log.Error(1, string(raw))
 	default:
 		return ErrInvalidRecord
 	}
 	if err != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.closed {
+			return err
+		}
 		s.failed = err
 	}
 	return err
@@ -76,15 +85,17 @@ func (s *eventLogSink) WriteRecord(raw []byte) error {
 
 func (s *eventLogSink) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
 	if s.log == nil {
+		s.mu.Unlock()
 		return nil
 	}
 	log := s.log
 	s.log = nil
+	s.mu.Unlock()
 	return log.Close()
 }

@@ -300,6 +300,10 @@ func (n *windowsRotationNamespace) Rotate(leaves [3]string, ids [3]Identity) (Re
 	if err != nil {
 		return nil, err
 	}
+	if err := oldest.RecheckIdentity(); err != nil || oldest.Identity() != ids[2] {
+		_ = oldest.Close()
+		return nil, ErrIdentityChanged
+	}
 	if err := winMarkDelete(oldest.fd); err != nil {
 		_ = oldest.Close()
 		return nil, ErrUnsafePath
@@ -309,6 +313,10 @@ func (n *windowsRotationNamespace) Rotate(leaves [3]string, ids [3]Identity) (Re
 	if err != nil {
 		return nil, err
 	}
+	if err := second.RecheckIdentity(); err != nil || second.Identity() != ids[1] {
+		_ = second.Close()
+		return nil, ErrIdentityChanged
+	}
 	if err := winRenameHandle(second.fd, n.op.fd, leaves[2]); err != nil {
 		_ = second.Close()
 		return nil, err
@@ -317,6 +325,10 @@ func (n *windowsRotationNamespace) Rotate(leaves [3]string, ids [3]Identity) (Re
 	active, err := n.openExisting(leaves[0])
 	if err != nil {
 		return nil, err
+	}
+	if err := active.RecheckIdentity(); err != nil || active.Identity() != ids[0] {
+		_ = active.Close()
+		return nil, ErrIdentityChanged
 	}
 	if err := winRenameHandle(active.fd, n.op.fd, leaves[1]); err != nil {
 		_ = active.Close()

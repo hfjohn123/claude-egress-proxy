@@ -120,6 +120,19 @@ undefined in the focused retained-tombstone test.
 - `go test ./internal/telemetry -run 'Test(FileSinkRotationOracle512BytesThrough61441Records|ValidateFileSink|OpenFileSinkRepairsOnlyCanonicalTailAndTombstone|FileSinkFaults)' -count=1 -v`: PASS.
 - `go vet ./internal/telemetry`: PASS.
 
+## Task 9 review fix wave (partial)
+
+- Added pre-mutation reopened-handle identity checks to Windows rotation.
+- Added exported restricted-file policy validation; file sinks reject identity-only policy.
+- Added `.3` to CheckOnly snapshots, changed interrupted active-tail repair to
+  discard unframed suffix bytes within the permitted window, and added prompt
+  Event Log Close while report is blocked.
+- Regenerated Windows Event Log resources with `%1%0`.
+- `go test ./...`, `go vet ./...`, tagged Event Log tests, resource `-Verify`,
+  and Linux/Windows amd64+arm64 telemetry compilation: PASS.
+- Race attempt is unavailable on this host: `go: -race requires cgo; enable
+  cgo by setting CGO_ENABLED=1` (the host does not provide gcc).
+
 ## Windows Event Log sink
 
 ### RED

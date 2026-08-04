@@ -27,7 +27,7 @@ func TestValidateFileSinkRejectsUnsafeBase(t *testing.T) {
 	}
 }
 
-func TestValidateFileSinkCheckOnlyAcceptsCanonicalGenerationWithoutMutation(t *testing.T) {
+func TestValidateFileSinkRejectsIdentityOnlyPolicy(t *testing.T) {
 	dir := t.TempDir()
 	root, err := securefs.OpenRoot(dir, securefs.RootPolicy{Access: securefs.IdentityOnlyPermissions()})
 	if err != nil {
@@ -41,19 +41,19 @@ func TestValidateFileSinkCheckOnlyAcceptsCanonicalGenerationWithoutMutation(t *t
 	if err := os.WriteFile(path, before, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateFileSink(context.Background(), root, "events", policy, CheckOnly); err != nil {
-		t.Fatalf("ValidateFileSink = %v", err)
+	if err := ValidateFileSink(context.Background(), root, "events", policy, CheckOnly); !errors.Is(err, ErrInvalidFileSink) {
+		t.Fatalf("ValidateFileSink = %v, want ErrInvalidFileSink", err)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(after) != string(before) {
-		t.Fatalf("CheckOnly mutated generation: %q", after)
+		t.Fatalf("invalid policy mutated generation: %q", after)
 	}
 }
 
-func TestValidateFileSinkCheckOnlyReportsRepairForCanonicalTail(t *testing.T) {
+func TestValidateFileSinkRejectsIdentityOnlyPolicyBeforeTailRepair(t *testing.T) {
 	dir := t.TempDir()
 	root, err := securefs.OpenRoot(dir, securefs.RootPolicy{Access: securefs.IdentityOnlyPermissions()})
 	if err != nil {
@@ -65,12 +65,12 @@ func TestValidateFileSinkCheckOnlyReportsRepairForCanonicalTail(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "events"), []byte(clean.JSON()), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateFileSink(context.Background(), root, "events", policy, CheckOnly); !errors.Is(err, ErrRepairRequired) {
-		t.Fatalf("ValidateFileSink = %v, want ErrRepairRequired", err)
+	if err := ValidateFileSink(context.Background(), root, "events", policy, CheckOnly); !errors.Is(err, ErrInvalidFileSink) {
+		t.Fatalf("ValidateFileSink = %v, want ErrInvalidFileSink", err)
 	}
 }
 
-func TestValidateFileSinkCheckOnlyReportsRepairForNonemptyTombstone(t *testing.T) {
+func TestValidateFileSinkRejectsIdentityOnlyPolicyBeforeTombstoneRepair(t *testing.T) {
 	dir := t.TempDir()
 	root, err := securefs.OpenRoot(dir, securefs.RootPolicy{Access: securefs.IdentityOnlyPermissions()})
 	if err != nil {
@@ -81,8 +81,8 @@ func TestValidateFileSinkCheckOnlyReportsRepairForNonemptyTombstone(t *testing.T
 	if err := os.WriteFile(filepath.Join(dir, "events.delete"), []byte("interrupted"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateFileSink(context.Background(), root, "events", policy, CheckOnly); !errors.Is(err, ErrRepairRequired) {
-		t.Fatalf("ValidateFileSink = %v, want ErrRepairRequired", err)
+	if err := ValidateFileSink(context.Background(), root, "events", policy, CheckOnly); !errors.Is(err, ErrInvalidFileSink) {
+		t.Fatalf("ValidateFileSink = %v, want ErrInvalidFileSink", err)
 	}
 }
 

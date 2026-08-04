@@ -314,7 +314,7 @@ func oracleHost(n int) string {
 }
 
 func fakeFileSinkPolicy() securefs.FilePolicy {
-	return securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, Access: securefs.IdentityOnlyPermissions(), MaxBytes: fileSinkMemberBytes}
+	return securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, Access: securefs.LinuxExactPermissions(1, 0o600), MaxBytes: fileSinkMemberBytes}
 }
 
 type fakeFileSinkRoot struct {

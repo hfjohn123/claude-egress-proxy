@@ -22,6 +22,41 @@ type testEventLog struct {
 	closed    int
 }
 
+type blockedEventLog struct{ started, release, closed chan struct{} }
+
+func (l *blockedEventLog) Info(uint32, string) error    { close(l.started); <-l.release; return nil }
+func (l *blockedEventLog) Warning(uint32, string) error { return nil }
+func (l *blockedEventLog) Error(uint32, string) error   { return nil }
+func (l *blockedEventLog) Close() error                 { close(l.closed); return nil }
+
+func TestEventLogSinkCloseDetachesBlockedReport(t *testing.T) {
+	log := &blockedEventLog{started: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{})}
+	restore := setEventLogOpenForTest(func(string) (eventLog, error) { return log, nil })
+	defer restore()
+	sink, err := OpenEventLogSink(eventLogSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- sink.WriteRecord(mustServiceState(t, "started")) }()
+	<-log.started
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-log.closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked on report")
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(log.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (l *testEventLog) Info(id uint32, text string) error {
 	l.events = append(l.events, capturedEvent{"info", id, text})
 	return l.reportErr

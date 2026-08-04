@@ -71,6 +71,10 @@ func validMutableEntryPolicy(policy FilePolicy) bool {
 	return validFilePolicy(policy) && policy.Kind == RegularFile &&
 		(policy.Access.kind == permissionLinuxExact || policy.Access.kind == permissionWindowsRestricted)
 }
+
+// IsRestrictedFilePolicy reports whether a regular file policy carries one of
+// the platform-restricted access models required for mutable private state.
+func IsRestrictedFilePolicy(policy FilePolicy) bool { return validMutableEntryPolicy(policy) }
 func validLockPolicy(policy FilePolicy) bool {
 	return validMutableEntryPolicy(policy) && policy.Presence == Optional
 }

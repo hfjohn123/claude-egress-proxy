@@ -314,7 +314,7 @@ func (s *fileSink) Close() error {
 
 func validFileSinkArgs(base string, policy securefs.FilePolicy, mode ValidationMode) bool {
 	return validFileSinkBase(base) && mode > ValidationInvalid && mode <= RepairActiveTail &&
-		policy.Presence == securefs.Optional && policy.Kind == securefs.RegularFile && policy.MaxBytes == fileSinkMemberBytes
+		policy.Presence == securefs.Optional && policy.Kind == securefs.RegularFile && policy.MaxBytes == fileSinkMemberBytes && securefs.IsRestrictedFilePolicy(policy)
 }
 
 func validFileSinkBase(base string) bool {
@@ -471,18 +471,16 @@ func validActiveLines(data []byte) (repair, ok bool) {
 		return false, true
 	}
 	last := bytes.LastIndexByte(data, '\n')
-	complete := []byte(nil)
-	if last >= 0 {
-		complete = data[:last+1]
+	if last < 0 {
+		return len(data) <= GeneratedRecordSchema.MaxBytes, len(data) <= GeneratedRecordSchema.MaxBytes
 	}
-	if len(complete) > 0 && !validCompleteLines(complete) {
+	if len(data)-last-1 > 2048 || !validCompleteLines(data[:last+1]) {
 		return false, false
 	}
 	if last == len(data)-1 {
 		return false, true
 	}
-	tail := data[last+1:]
-	return true, len(tail) >= 1 && len(tail) <= GeneratedRecordSchema.MaxBytes && canonicalRecord(tail)
+	return true, true
 }
 
 type diskRecord struct {
@@ -538,7 +536,7 @@ func contractByteTotals(in, out uint64) contract.ByteTotals {
 	return contract.ByteTotals{ClientToOrigin: in, OriginToClient: out}
 }
 
-type fileSinkSnapshot struct{ entries [5]snapshotEntry }
+type fileSinkSnapshot struct{ entries [6]snapshotEntry }
 type snapshotEntry struct {
 	state  securefs.FileState
 	digest [sha256.Size]byte
@@ -549,10 +547,10 @@ func takeFileSinkSnapshot(r fileReader, base string, policy securefs.FilePolicy)
 	if err := r.RecheckIdentity(); err != nil {
 		return out, err
 	}
-	names := [5]string{base, base + ".1", base + ".2", base + ".lock", base + ".delete"}
+	names := [6]string{base, base + ".1", base + ".2", base + ".3", base + ".lock", base + ".delete"}
 	for i, name := range names {
 		p := optionalFilePolicy(policy)
-		if i == 3 {
+		if i == 4 {
 			p.MaxBytes = 0
 		}
 		state, err := r.Inspect(name, p)
@@ -568,7 +566,7 @@ func takeFileSinkSnapshot(r fileReader, base string, policy securefs.FilePolicy)
 				}
 				return out, securefs.ErrIdentityChanged
 			}
-			if i == 3 && len(data) != 0 {
+			if i == 3 || i == 4 && len(data) != 0 {
 				return out, securefs.ErrUnsafePath
 			}
 			out.entries[i].digest = sha256.Sum256(data)
