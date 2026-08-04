@@ -23,3 +23,21 @@ fixed 256-token semaphore, and fixed notification channels. Shutdown/failure
 wait for in-flight producers before snapshotting the accepted tail; tagged tests
 cover concurrent capacity admission, static producer lock/goroutine absence,
 and a reserved-ticket shutdown publication barrier.
+
+RED: final oracle inspection showed the shutdown test submitted `stopped` after
+the producer gate closed, so its 252-drop total did not prove that `stopped` was
+accepted as FIFO record 256. The suite also lacked direct abandoned-writer byte
+immutability, concurrent repeated-shutdown, and ordinary-build symbol checks.
+
+GREEN: `stopped` is now accepted and verified at ticket 255 before shutdown;
+four writes complete at cumulative 249/498/747/996 milliseconds and the active
+fifth plus 251 queued records terminalize at exactly one second. Added a sink
+that retains the live slot slice through timeout and concurrent close, proving
+quiescence without slot reuse or a second call/result. Concurrent shutdown
+callers share one deadline, timer, close, and terminal result. Source/build-tag
+tests freeze the exact test-control boundary.
+
+Final verification: `go test -tags=cep_testcontrol ./internal/telemetry -run
+'Test(Logger|BlockedSink|Shutdown|Stream)' -count=20`, `go test ./...`, `go vet
+./...`, and `git diff --check` pass. The Windows host cannot run the race suite:
+`go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`.
