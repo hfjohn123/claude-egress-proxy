@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"math"
 	"net/netip"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,25 +12,6 @@ import (
 )
 
 var recordTime = time.Date(2026, 8, 4, 12, 0, 0, 123456789, time.FixedZone("x", -3600))
-
-func TestGeneratedRecordTuplesExact(t *testing.T) {
-	want := []RecordTuple{
-		{"tunnel_closed", "clean", "info"}, {"tunnel_closed", "io_error", "error"}, {"tunnel_closed", "idle_timeout", "info"}, {"tunnel_closed", "absolute_lifetime", "info"}, {"tunnel_closed", "credential_revoked", "info"}, {"tunnel_closed", "shutdown_deadline", "info"},
-		{"reload", "credential_failure", "warn"}, {"reload", "certificate_failure", "warn"}, {"reload", "public_self_failure", "warn"}, {"reload", "source_bind_failure", "warn"}, {"reload", "acme_failure", "warn"}, {"reload", "credential_recovered", "info"}, {"reload", "certificate_recovered", "info"}, {"reload", "public_self_recovered", "info"}, {"reload", "source_bind_recovered", "info"}, {"reload", "acme_recovered", "info"},
-		{"service_state", "started", "info"}, {"service_state", "ready", "info"}, {"service_state", "draining", "info"}, {"service_state", "stopped", "info"}, {"service_state", "credential_store_recovered", "info"}, {"service_state", "not_ready", "warn"}, {"service_state", "insecure_loopback", "warn"}, {"service_state", "dangerous_custom_suffixes", "warn"}, {"service_state", "credential_store_unavailable", "warn"}, {"service_state", "startup_failed", "error"},
-	}
-	if !slices.Equal(GeneratedRecordTuples, want) {
-		t.Fatalf("record tuples = %#v", GeneratedRecordTuples)
-	}
-	for _, tuple := range want {
-		if !generatedRecordLevel(tuple.Event, tuple.Reason, tuple.Level) {
-			t.Fatalf("tuple missing %#v", tuple)
-		}
-	}
-	if generatedRecordLevel("reload", "credential_success", "info") {
-		t.Fatal("reload success tuple accepted")
-	}
-}
 
 func TestTunnelClosedExhaustiveClosedGrammar(t *testing.T) {
 	for _, name := range contract.AllCloseResults() {

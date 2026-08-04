@@ -40,6 +40,21 @@ func TestFrameworkSilenceNeverNamesRemovedFrameworkToken(t *testing.T) {
 	}
 }
 
+func TestGeneratedRecordLookupHasNoMutableExport(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "internal", "telemetry", "generated.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"RecordTuple", "GeneratedRecordTuples"} {
+		if strings.Contains(string(b), forbidden) {
+			t.Fatalf("generated record lookup exports mutable surface %s", forbidden)
+		}
+	}
+	if !strings.Contains(string(b), "func generatedRecordLevel(") {
+		t.Fatal("generated immutable lookup missing")
+	}
+}
+
 // This fails if telemetrygen stops treating both checked-in artifacts as
 // manifest renderings (rather than only checking a convenient subset).
 func TestGeneratorCheckRejectsMissingAndDriftedOwnedOutput(t *testing.T) {

@@ -227,14 +227,13 @@ func renderGo(m manifest) ([]byte, error) {
 	}
 	b.WriteString("}\n\ntype EmissionCase struct { ID, PrimaryEmitter, Required, Forbidden string }\n")
 	b.WriteString("type RecordSchema struct { Base, Sensitive []string; MaxBytes int }\n")
-	b.WriteString("type RecordTuple struct { Event, Reason, Level string }\n")
 	fmt.Fprintf(&b, "var GeneratedRecordSchema = RecordSchema{Base:%#v, Sensitive:%#v, MaxBytes:%d}\n", m.Records.Base, m.Records.Sensitive, m.Records.MaxBytes)
-	b.WriteString("var GeneratedRecordTuples = []RecordTuple{\n")
+	b.WriteString("func generatedRecordLevel(event, reason string) (string, bool) {\n\tswitch event + \"/\" + reason {\n")
 	for _, tuple := range m.Records.Tuples {
 		p := strings.Split(tuple, "/")
-		fmt.Fprintf(&b, "{Event:%q, Reason:%q, Level:%q},\n", p[0], p[1], p[2])
+		fmt.Fprintf(&b, "\tcase %q: return %q, true\n", p[0]+"/"+p[1], p[2])
 	}
-	b.WriteString("}\n")
+	b.WriteString("\tdefault: return \"\", false\n\t}\n}\n")
 	b.WriteString("var ValidLimiterPairs = map[string]bool{\n")
 	for _, pair := range m.LimiterPairs {
 		fmt.Fprintf(&b, "%q:true,\n", pair)

@@ -131,3 +131,11 @@ Finding 2 RED: schema/generated reference named removed framework token. GREEN: 
 Finding 3 RED: absent-certificate gather test showed no clock call. GREEN: gauge snapshots `clock.Now().UTC()` once before absent-certificate branch; test asserts one certificate callback and one clock call per gather.
 
 Verification passed: `go fmt ./...`, `go generate ./...`, generator `-check`, `go mod download`, `go mod verify`, `go test ./...`, `go vet ./...`, `go list -m all`, and `git diff --check`. Race attempt has exact environment limitation: `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`. Self-review: tuple validation is exact in generator and constructors no longer encode level/reason mappings separately.
+
+## Review fix round 2
+
+RED: `TestGeneratedRecordLookupHasNoMutableExport` failed because generated `RecordTuple` and `GeneratedRecordTuples` exported mutable runtime state.
+
+GREEN: generator now renders an unexported `generatedRecordLevel` switch; constructors call it directly. Manifest still owns exact ordered tuples and docs still render them. Exhaustive constructor tests cover all 26 mappings and reload-success absence. Public-surface test rejects mutable tuple exports.
+
+Verification passed: `go fmt ./...`, `go generate ./...`, generator `-check`, focused/full tests, `go mod download`, `go mod verify`, `go vet ./...`, `go list -m all`, and `git diff --check`. Race limitation: `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`. Self-review: runtime tuple lookup has no mutable data structure or exported schema API.

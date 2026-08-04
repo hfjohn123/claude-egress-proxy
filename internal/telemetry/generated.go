@@ -35,37 +35,68 @@ type RecordSchema struct {
 	Base, Sensitive []string
 	MaxBytes        int
 }
-type RecordTuple struct{ Event, Reason, Level string }
 
 var GeneratedRecordSchema = RecordSchema{Base: []string{"timestamp:string:rfc3339nano_utc", "level:string:fixed", "event:string:closed", "reason:string:closed"}, Sensitive: []string{"destination_hostname:string:1..253", "device_identifier:string:1..64", "source_prefix:string:ipv4_24_or_ipv6_64", "duration_ms:uint64", "bytes_client_to_origin:uint64", "bytes_origin_to_client:uint64"}, MaxBytes: 2047}
-var GeneratedRecordTuples = []RecordTuple{
-	{Event: "tunnel_closed", Reason: "clean", Level: "info"},
-	{Event: "tunnel_closed", Reason: "io_error", Level: "error"},
-	{Event: "tunnel_closed", Reason: "idle_timeout", Level: "info"},
-	{Event: "tunnel_closed", Reason: "absolute_lifetime", Level: "info"},
-	{Event: "tunnel_closed", Reason: "credential_revoked", Level: "info"},
-	{Event: "tunnel_closed", Reason: "shutdown_deadline", Level: "info"},
-	{Event: "reload", Reason: "credential_failure", Level: "warn"},
-	{Event: "reload", Reason: "certificate_failure", Level: "warn"},
-	{Event: "reload", Reason: "public_self_failure", Level: "warn"},
-	{Event: "reload", Reason: "source_bind_failure", Level: "warn"},
-	{Event: "reload", Reason: "acme_failure", Level: "warn"},
-	{Event: "reload", Reason: "credential_recovered", Level: "info"},
-	{Event: "reload", Reason: "certificate_recovered", Level: "info"},
-	{Event: "reload", Reason: "public_self_recovered", Level: "info"},
-	{Event: "reload", Reason: "source_bind_recovered", Level: "info"},
-	{Event: "reload", Reason: "acme_recovered", Level: "info"},
-	{Event: "service_state", Reason: "started", Level: "info"},
-	{Event: "service_state", Reason: "ready", Level: "info"},
-	{Event: "service_state", Reason: "draining", Level: "info"},
-	{Event: "service_state", Reason: "stopped", Level: "info"},
-	{Event: "service_state", Reason: "credential_store_recovered", Level: "info"},
-	{Event: "service_state", Reason: "not_ready", Level: "warn"},
-	{Event: "service_state", Reason: "insecure_loopback", Level: "warn"},
-	{Event: "service_state", Reason: "dangerous_custom_suffixes", Level: "warn"},
-	{Event: "service_state", Reason: "credential_store_unavailable", Level: "warn"},
-	{Event: "service_state", Reason: "startup_failed", Level: "error"},
+
+func generatedRecordLevel(event, reason string) (string, bool) {
+	switch event + "/" + reason {
+	case "tunnel_closed/clean":
+		return "info", true
+	case "tunnel_closed/io_error":
+		return "error", true
+	case "tunnel_closed/idle_timeout":
+		return "info", true
+	case "tunnel_closed/absolute_lifetime":
+		return "info", true
+	case "tunnel_closed/credential_revoked":
+		return "info", true
+	case "tunnel_closed/shutdown_deadline":
+		return "info", true
+	case "reload/credential_failure":
+		return "warn", true
+	case "reload/certificate_failure":
+		return "warn", true
+	case "reload/public_self_failure":
+		return "warn", true
+	case "reload/source_bind_failure":
+		return "warn", true
+	case "reload/acme_failure":
+		return "warn", true
+	case "reload/credential_recovered":
+		return "info", true
+	case "reload/certificate_recovered":
+		return "info", true
+	case "reload/public_self_recovered":
+		return "info", true
+	case "reload/source_bind_recovered":
+		return "info", true
+	case "reload/acme_recovered":
+		return "info", true
+	case "service_state/started":
+		return "info", true
+	case "service_state/ready":
+		return "info", true
+	case "service_state/draining":
+		return "info", true
+	case "service_state/stopped":
+		return "info", true
+	case "service_state/credential_store_recovered":
+		return "info", true
+	case "service_state/not_ready":
+		return "warn", true
+	case "service_state/insecure_loopback":
+		return "warn", true
+	case "service_state/dangerous_custom_suffixes":
+		return "warn", true
+	case "service_state/credential_store_unavailable":
+		return "warn", true
+	case "service_state/startup_failed":
+		return "error", true
+	default:
+		return "", false
+	}
 }
+
 var ValidLimiterPairs = map[string]bool{
 	"tls_handshake/allowed":             true,
 	"tls_handshake/throttled":           true,

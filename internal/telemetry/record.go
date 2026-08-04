@@ -28,7 +28,7 @@ func TunnelClosed(at time.Time, reason contract.CloseResult, sensitive *Sensitiv
 	if !closed(reason) {
 		return Record{}, ErrInvalidRecord
 	}
-	level, ok := generatedRecordTuple("tunnel_closed", reason.String())
+	level, ok := generatedRecordLevel("tunnel_closed", reason.String())
 	if !ok {
 		return Record{}, ErrInvalidRecord
 	}
@@ -39,7 +39,7 @@ func ReloadRecord(at time.Time, kind contract.ReloadKind, result contract.Reload
 		return Record{}, ErrInvalidRecord
 	}
 	reason := kind.String() + "_" + result.String()
-	level, ok := generatedRecordTuple("reload", reason)
+	level, ok := generatedRecordLevel("reload", reason)
 	if !ok {
 		return Record{}, ErrInvalidRecord
 	}
@@ -49,23 +49,11 @@ func ServiceState(at time.Time, reason contract.ServiceStateReason) (Record, err
 	if !serviceReason(reason) {
 		return Record{}, ErrInvalidRecord
 	}
-	level, ok := generatedRecordTuple("service_state", reason.String())
+	level, ok := generatedRecordLevel("service_state", reason.String())
 	if !ok {
 		return Record{}, ErrInvalidRecord
 	}
 	return build(at, level, "service_state", reason.String(), nil)
-}
-func generatedRecordTuple(event, reason string) (string, bool) {
-	for _, tuple := range GeneratedRecordTuples {
-		if tuple.Event == event && tuple.Reason == reason {
-			return tuple.Level, true
-		}
-	}
-	return "", false
-}
-func generatedRecordLevel(event, reason, level string) bool {
-	got, ok := generatedRecordTuple(event, reason)
-	return ok && got == level
 }
 func build(at time.Time, level, event, reason string, s *SensitiveMetadata) (Record, error) {
 	if at.IsZero() || at.UTC().Year() < 0 || at.UTC().Year() > 9999 {
