@@ -32,3 +32,13 @@ func TestLoopbackEndpointRejectsNonLoopback(t *testing.T) {
 		t.Fatal("accepted noncanonical loopback")
 	}
 }
+
+func TestRenderRejectsZeroPolicyAndEmptyRules(t *testing.T) {
+	e, err := RemoteEndpoint("proxy.example", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Render(policy.Policy{}, e, VisibilityLocal); err == nil {
+		t.Fatal("accepted zero policy")
+	}
+}

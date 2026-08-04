@@ -173,3 +173,15 @@ func TestDecodeRejectsIANAIPv4RangesThatAreNotGloballyReachable(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeMapsInvalidDestinationRulesToValue(t *testing.T) {
+	for _, destination := range []string{
+		"exact_hosts: [bücher..example]", "exact_hosts: [api.anthropic.com, api.anthropic.com]",
+		"suffixes: [com]", "suffixes: [example.invalid]",
+	} {
+		doc := append(validDocument(t), []byte("destination:\n  "+destination+"\n")...)
+		if _, err := config.Decode(doc); !errors.Is(err, config.ErrValue) {
+			t.Fatalf("%q error = %v", destination, err)
+		}
+	}
+}

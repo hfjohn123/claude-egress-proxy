@@ -15,7 +15,7 @@ import (
 
 func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy RootPolicy, target string, data []byte, policy FilePolicy) (CommitBoundary, error) {
 	r, ok := op.(*windowsRoot)
-	if !ok || r.recheck() != nil {
+	if !ok || winOutputRoot(r, rootPolicy) != nil {
 		return CommitBoundary{}, ErrUnsafePath
 	}
 	if err := ctx.Err(); err != nil {
@@ -30,6 +30,9 @@ func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy Root
 		return CommitBoundary{}, ErrUnsafePath
 	}
 	temp := fmt.Sprintf(".%s.%x.tmp", target, token)
+	if winOutputRoot(r, rootPolicy) != nil {
+		return CommitBoundary{}, ErrIdentityChanged
+	}
 	h, err := winOpenState(r.fd, temp, true, policy)
 	if err != nil {
 		return CommitBoundary{}, ErrUnsafePath
@@ -46,7 +49,7 @@ func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy Root
 			_ = windows.CloseHandle(h)
 		}
 		if owned {
-			_ = winDeleteOwnedTemp(r, temp, id, policy)
+			_ = winDeleteOwnedTemp(r, rootPolicy, temp, id, policy)
 		}
 	}()
 	var wrote uint32
@@ -62,6 +65,13 @@ func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy Root
 	h = 0
 	if err := ctx.Err(); err != nil {
 		return CommitBoundary{}, err
+	}
+	if winOutputRoot(r, rootPolicy) != nil || !winTempCurrent(r, temp, id, policy) {
+		return CommitBoundary{}, ErrIdentityChanged
+	}
+	now, inspectErr := r.inspect(target, FilePolicy{Presence: Optional, Kind: RegularFile, Access: policy.Access, MaxBytes: policy.MaxBytes})
+	if inspectErr != nil || now.Present != state.Present || now.Present && now.Identity != state.Identity {
+		return CommitBoundary{}, ErrIdentityChanged
 	}
 	tempPath, targetPath := filepath.Join(r.path, temp), filepath.Join(r.path, target)
 	a, _ := windows.UTF16PtrFromString(tempPath)
@@ -94,7 +104,35 @@ func platformPublishOutput(ctx context.Context, op platformRoot, rootPolicy Root
 	return CommitBoundary{NamespacePublished: true, TargetDurable: true}, nil
 }
 
-func winDeleteOwnedTemp(r *windowsRoot, name string, id Identity, policy FilePolicy) error {
+func winOutputRoot(r *windowsRoot, policy RootPolicy) error {
+	if r.recheck() != nil {
+		return ErrIdentityChanged
+	}
+	info, err := winInfo(r.fd)
+	if err != nil {
+		return ErrUnsafePath
+	}
+	id, err := winIdentity(r.fd, info)
+	if err != nil || id != r.id {
+		return ErrIdentityChanged
+	}
+	return winCheck(r.fd, info, Directory, policy.Access)
+}
+func winTempCurrent(r *windowsRoot, name string, id Identity, policy FilePolicy) bool {
+	h, err := winOpenState(r.fd, name, false, policy)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(h)
+	info, err := winInfo(h)
+	current, idErr := winIdentity(h, info)
+	return err == nil && idErr == nil && current == id && winCheck(h, info, RegularFile, policy.Access) == nil
+}
+
+func winDeleteOwnedTemp(r *windowsRoot, rootPolicy RootPolicy, name string, id Identity, policy FilePolicy) error {
+	if winOutputRoot(r, rootPolicy) != nil {
+		return ErrIdentityChanged
+	}
 	h, err := winOpenState(r.fd, name, false, policy)
 	if err != nil {
 		return ErrIdentityChanged

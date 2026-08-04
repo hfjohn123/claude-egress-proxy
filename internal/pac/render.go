@@ -13,6 +13,7 @@ import (
 
 var ErrInvalidEndpoint = errors.New("invalid PAC endpoint")
 var ErrInvalidVisibility = errors.New("invalid PAC visibility")
+var ErrInvalidPolicy = errors.New("invalid PAC policy")
 
 type ProxyEndpoint struct{ directive string }
 type Visibility uint8
@@ -51,6 +52,9 @@ func Render(p policy.Policy, endpoint ProxyEndpoint, v Visibility) ([]byte, erro
 		label = "local"
 	default:
 		return nil, ErrInvalidVisibility
+	}
+	if p.Profile() == "" || len(rules.ExactHosts())+len(rules.Suffixes()) == 0 {
+		return nil, ErrInvalidPolicy
 	}
 	conditions := make([]string, 0, len(rules.ExactHosts())+len(rules.Suffixes()))
 	for _, h := range rules.ExactHosts() {

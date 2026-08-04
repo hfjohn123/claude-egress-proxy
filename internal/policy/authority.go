@@ -35,21 +35,36 @@ func ParseAuthority(raw []byte) (Authority, SemanticError) {
 	if !ok {
 		return Authority{}, SemanticMalformed
 	}
-	n, err := strconv.ParseUint(port, 10, 16)
-	if err != nil || port == "" || port[0] == '0' || n == 0 {
+	if !canonicalPort(port) {
 		return Authority{}, SemanticMalformed
 	}
-	if n != 443 {
-		return Authority{}, SemanticPortDenied
-	}
+	n, _ := strconv.ParseUint(port, 10, 16)
 	if literal {
+		if n != 443 {
+			return Authority{}, SemanticPortDenied
+		}
 		return Authority{}, SemanticAddressDenied
 	}
 	hn, err := NormalizeHostname(host)
 	if err != nil {
 		return Authority{}, SemanticMalformed
 	}
+	if n != 443 {
+		return Authority{}, SemanticPortDenied
+	}
 	return Authority{hn, uint16(n)}, SemanticNone
+}
+func canonicalPort(port string) bool {
+	if port == "" || port[0] == '0' {
+		return false
+	}
+	for i := range port {
+		if port[i] < '0' || port[i] > '9' {
+			return false
+		}
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	return err == nil && n != 0
 }
 func splitAuthority(s string) (string, string, bool, bool) {
 	if strings.HasPrefix(s, "[") {
