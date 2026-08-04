@@ -42,8 +42,9 @@ func TestFinishTunnelRecordsCloseAndRejectsInexactBytes(t *testing.T) {
 
 func TestCertificateExpiryRunsOncePerGatherAndFloors(t *testing.T) {
 	var calls atomic.Int32
+	var clockCalls atomic.Int32
 	now := time.Date(2026, 8, 4, 12, 0, 0, 500_000_000, time.UTC)
-	clock := fixedClock{now: now}
+	clock := countedClock{now: now, calls: &clockCalls}
 	m, err := NewMetrics(clock, func() (time.Time, bool) { calls.Add(1); return now.Add(1500 * time.Millisecond), true })
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +61,23 @@ func TestCertificateExpiryRunsOncePerGatherAndFloors(t *testing.T) {
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("callback calls = %d, want 2", got)
 	}
+	if got := clockCalls.Load(); got != 2 {
+		t.Fatalf("clock calls = %d, want 2", got)
+	}
+}
+
+func TestCertificateExpiryCallsClockWhenCertificateAbsent(t *testing.T) {
+	var certificateCalls, clockCalls atomic.Int32
+	m, err := NewMetrics(countedClock{now: time.Now(), calls: &clockCalls}, func() (time.Time, bool) { certificateCalls.Add(1); return time.Time{}, false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gaugeValue(t, m, "claude_proxy_certificate_expiry_seconds"); got != 0 {
+		t.Fatalf("expiry = %v, want 0", got)
+	}
+	if certificateCalls.Load() != 1 || clockCalls.Load() != 1 {
+		t.Fatalf("calls certificate=%d clock=%d, want 1,1", certificateCalls.Load(), clockCalls.Load())
+	}
 }
 
 type fixedClock struct {
@@ -68,6 +86,14 @@ type fixedClock struct {
 }
 
 func (c fixedClock) Now() time.Time { return c.now }
+
+type countedClock struct {
+	timebase.Real
+	now   time.Time
+	calls *atomic.Int32
+}
+
+func (c countedClock) Now() time.Time { c.calls.Add(1); return c.now }
 
 func mustPanicClosed(t *testing.T, f func()) {
 	t.Helper()

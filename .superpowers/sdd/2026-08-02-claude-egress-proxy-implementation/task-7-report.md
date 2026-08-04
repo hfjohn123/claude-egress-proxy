@@ -121,3 +121,13 @@ RED: `go test ./internal/telemetry -run TestSensitiveMetadataGrammarBoundariesAn
 Added independent exhaustive record tests for every close, reload, and service-state enum mapping; invalid enum atomic rejection; UTC RFC3339Nano timestamp boundaries; exact base/extension key order and JSON grammar; uint64 duration/byte exactness through `MaxUint64`; immutable copied record output; sensitive-host/device/prefix boundary grammar including mapped IPv6 rejection; all-or-none invalid extension rejection; and direct oversized internal build rejection.
 
 Verification: focused record suite, `go fmt ./...`, `go generate ./...`, generator `-check`, `go mod download`, `go mod verify`, `go test ./...`, `go vet ./...`, `go list -m all`, and `git diff --check` passed. Race attempt exact limitation: `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`. No record-contract acceptance concern remains.
+
+## Review fix round 1
+
+Finding 1 RED: `TestGeneratedRecordTuplesExact` failed because generated record tuple data and lookup did not exist. GREEN: manifest now owns 26 ordered event/reason/level tuples; generator validates exact order/content, generates them, documents them, and record constructors use generated lookup. Literal test rejects reload success.
+
+Finding 2 RED: schema/generated reference named removed framework token. GREEN: removed it from silence contract, updated digest/rendered outputs, and added scan test across schema/generated/docs.
+
+Finding 3 RED: absent-certificate gather test showed no clock call. GREEN: gauge snapshots `clock.Now().UTC()` once before absent-certificate branch; test asserts one certificate callback and one clock call per gather.
+
+Verification passed: `go fmt ./...`, `go generate ./...`, generator `-check`, `go mod download`, `go mod verify`, `go test ./...`, `go vet ./...`, `go list -m all`, and `git diff --check`. Race attempt has exact environment limitation: `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`. Self-review: tuple validation is exact in generator and constructors no longer encode level/reason mappings separately.

@@ -48,7 +48,7 @@ func TestEmissionMatrixHasOneClosedOwnerPerCase(t *testing.T) {
 		}
 	}
 	wantSilence := []struct{ id, owner, required, forbidden string }{
-		{"silence_01_pre_handler_framework_rejection", "framework", "disconnect, timeout, malformed, oversized, unsupported, and framework-owned Host/framing rejection before handler entry", "authentication/connect/PAC/setup/application record/header_too_large"},
+		{"silence_01_pre_handler_framework_rejection", "framework", "disconnect, timeout, malformed, oversized, unsupported, and framework-owned Host/framing rejection before handler entry", "authentication/connect/PAC/setup/application record"},
 		{"silence_02_handler_version_or_method_rejection", "public_adapter", "handler version or method rejection", "connect/auth/PAC"},
 		{"silence_03_acme_challenge_no_request_telemetry", "tls", "ACME challenge handshake", "request telemetry"},
 		{"silence_04_no_certificate_failure_no_request_telemetry", "tls", "no certificate failure", "request telemetry/log"},

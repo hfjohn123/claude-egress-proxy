@@ -25,12 +25,12 @@ type Record struct{ json string }
 func (r Record) JSON() string { return r.json }
 
 func TunnelClosed(at time.Time, reason contract.CloseResult, sensitive *SensitiveMetadata) (Record, error) {
-	level := "info"
 	if !closed(reason) {
 		return Record{}, ErrInvalidRecord
 	}
-	if reason.String() == "io_error" {
-		level = "error"
+	level, ok := generatedRecordTuple("tunnel_closed", reason.String())
+	if !ok {
+		return Record{}, ErrInvalidRecord
 	}
 	return build(at, level, "tunnel_closed", reason.String(), sensitive)
 }
@@ -39,9 +39,9 @@ func ReloadRecord(at time.Time, kind contract.ReloadKind, result contract.Reload
 		return Record{}, ErrInvalidRecord
 	}
 	reason := kind.String() + "_" + result.String()
-	level := "warn"
-	if result.String() == "recovered" {
-		level = "info"
+	level, ok := generatedRecordTuple("reload", reason)
+	if !ok {
+		return Record{}, ErrInvalidRecord
 	}
 	return build(at, level, "reload", reason, nil)
 }
@@ -49,14 +49,23 @@ func ServiceState(at time.Time, reason contract.ServiceStateReason) (Record, err
 	if !serviceReason(reason) {
 		return Record{}, ErrInvalidRecord
 	}
-	level := "info"
-	switch reason.String() {
-	case "not_ready", "insecure_loopback", "dangerous_custom_suffixes", "credential_store_unavailable":
-		level = "warn"
-	case "startup_failed":
-		level = "error"
+	level, ok := generatedRecordTuple("service_state", reason.String())
+	if !ok {
+		return Record{}, ErrInvalidRecord
 	}
 	return build(at, level, "service_state", reason.String(), nil)
+}
+func generatedRecordTuple(event, reason string) (string, bool) {
+	for _, tuple := range GeneratedRecordTuples {
+		if tuple.Event == event && tuple.Reason == reason {
+			return tuple.Level, true
+		}
+	}
+	return "", false
+}
+func generatedRecordLevel(event, reason, level string) bool {
+	got, ok := generatedRecordTuple(event, reason)
+	return ok && got == level
 }
 func build(at time.Time, level, event, reason string, s *SensitiveMetadata) (Record, error) {
 	if at.IsZero() || at.UTC().Year() < 0 || at.UTC().Year() > 9999 {

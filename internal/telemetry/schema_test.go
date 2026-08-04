@@ -28,6 +28,18 @@ func TestSchemaHasClosedSurface(t *testing.T) {
 	}
 }
 
+func TestFrameworkSilenceNeverNamesRemovedFrameworkToken(t *testing.T) {
+	for _, path := range []string{"schema/telemetry.yaml", "internal/telemetry/generated.go", "docs/reference/telemetry.md"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "header_"+"too_large") {
+			t.Fatalf("%s names removed framework token", path)
+		}
+	}
+}
+
 // This fails if telemetrygen stops treating both checked-in artifacts as
 // manifest renderings (rather than only checking a convenient subset).
 func TestGeneratorCheckRejectsMissingAndDriftedOwnedOutput(t *testing.T) {

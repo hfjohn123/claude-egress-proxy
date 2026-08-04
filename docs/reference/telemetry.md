@@ -32,6 +32,35 @@ Buckets: `1`, `5`, `30`, `60`, `300`, `900`, `1800`, `3600`, `21600`, `86400`, `
 
 Base fields: `timestamp:string:rfc3339nano_utc`, `level:string:fixed`, `event:string:closed`, `reason:string:closed`. Sensitive tunnel extension (all-or-none): `destination_hostname:string:1..253`, `device_identifier:string:1..64`, `source_prefix:string:ipv4_24_or_ipv6_64`, `duration_ms:uint64`, `bytes_client_to_origin:uint64`, `bytes_origin_to_client:uint64`. Maximum JSON size: 2047 bytes.
 
+| Event | Reason | Level |
+| --- | --- | --- |
+| `tunnel_closed` | `clean` | `info` |
+| `tunnel_closed` | `io_error` | `error` |
+| `tunnel_closed` | `idle_timeout` | `info` |
+| `tunnel_closed` | `absolute_lifetime` | `info` |
+| `tunnel_closed` | `credential_revoked` | `info` |
+| `tunnel_closed` | `shutdown_deadline` | `info` |
+| `reload` | `credential_failure` | `warn` |
+| `reload` | `certificate_failure` | `warn` |
+| `reload` | `public_self_failure` | `warn` |
+| `reload` | `source_bind_failure` | `warn` |
+| `reload` | `acme_failure` | `warn` |
+| `reload` | `credential_recovered` | `info` |
+| `reload` | `certificate_recovered` | `info` |
+| `reload` | `public_self_recovered` | `info` |
+| `reload` | `source_bind_recovered` | `info` |
+| `reload` | `acme_recovered` | `info` |
+| `service_state` | `started` | `info` |
+| `service_state` | `ready` | `info` |
+| `service_state` | `draining` | `info` |
+| `service_state` | `stopped` | `info` |
+| `service_state` | `credential_store_recovered` | `info` |
+| `service_state` | `not_ready` | `warn` |
+| `service_state` | `insecure_loopback` | `warn` |
+| `service_state` | `dangerous_custom_suffixes` | `warn` |
+| `service_state` | `credential_store_unavailable` | `warn` |
+| `service_state` | `startup_failed` | `error` |
+
 ## Primary emission matrix
 
 | ID | Owner | Required | Forbidden |
@@ -74,7 +103,7 @@ Base fields: `timestamp:string:rfc3339nano_utc`, `level:string:fixed`, `event:st
 
 | ID | Owner | Required | Forbidden |
 | --- | --- | --- | --- |
-| `silence_01_pre_handler_framework_rejection` | `framework` | disconnect, timeout, malformed, oversized, unsupported, and framework-owned Host/framing rejection before handler entry | authentication/connect/PAC/setup/application record/header_too_large |
+| `silence_01_pre_handler_framework_rejection` | `framework` | disconnect, timeout, malformed, oversized, unsupported, and framework-owned Host/framing rejection before handler entry | authentication/connect/PAC/setup/application record |
 | `silence_02_handler_version_or_method_rejection` | `public_adapter` | handler version or method rejection | connect/auth/PAC |
 | `silence_03_acme_challenge_no_request_telemetry` | `tls` | ACME challenge handshake | request telemetry |
 | `silence_04_no_certificate_failure_no_request_telemetry` | `tls` | no certificate failure | request telemetry/log |

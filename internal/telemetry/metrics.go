@@ -98,10 +98,11 @@ func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, 
 	}
 	for name, fn := range map[string]func() float64{"claude_proxy_certificate_expiry_seconds": func() float64 {
 		n, ok := m.certificateNotAfter()
+		now := m.clock.Now().UTC()
 		if !ok {
 			return 0
 		}
-		d := n.Sub(m.clock.Now().UTC())
+		d := n.Sub(now)
 		if d < 0 {
 			return 0
 		}

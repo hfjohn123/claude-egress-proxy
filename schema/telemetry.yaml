@@ -22,6 +22,7 @@ records:
   base: [timestamp:string:rfc3339nano_utc, level:string:fixed, event:string:closed, reason:string:closed]
   sensitive: [destination_hostname:string:1..253, device_identifier:string:1..64, source_prefix:string:ipv4_24_or_ipv6_64, duration_ms:uint64, bytes_client_to_origin:uint64, bytes_origin_to_client:uint64]
   max_bytes: 2047
+  tuples: [tunnel_closed/clean/info, tunnel_closed/io_error/error, tunnel_closed/idle_timeout/info, tunnel_closed/absolute_lifetime/info, tunnel_closed/credential_revoked/info, tunnel_closed/shutdown_deadline/info, reload/credential_failure/warn, reload/certificate_failure/warn, reload/public_self_failure/warn, reload/source_bind_failure/warn, reload/acme_failure/warn, reload/credential_recovered/info, reload/certificate_recovered/info, reload/public_self_recovered/info, reload/source_bind_recovered/info, reload/acme_recovered/info, service_state/started/info, service_state/ready/info, service_state/draining/info, service_state/stopped/info, service_state/credential_store_recovered/info, service_state/not_ready/warn, service_state/insecure_loopback/warn, service_state/dangerous_custom_suffixes/warn, service_state/credential_store_unavailable/warn, service_state/startup_failed/error]
 matrix:
   - {id: matrix_01_production_mapped_admission, primary_emitter: admission, required: "limiter tls_handshake/allowed; later TLS row also applies", forbidden: ""}
   - {id: matrix_02_production_overflow_admission, primary_emitter: admission, required: "limiter tls_handshake/saturation_overflow; later TLS row also applies", forbidden: ""}
@@ -57,7 +58,7 @@ matrix:
   - {id: matrix_32_reload_recovered, primary_emitter: reload, required: "reload recovered; matching recovery log", forbidden: "additional success"}
   - {id: matrix_33_service_state_transition, primary_emitter: service, required: "one matching service_state log; resulting gauges change", forbidden: ""}
 silence:
-  - {id: silence_01_pre_handler_framework_rejection, primary_emitter: framework, required: "disconnect, timeout, malformed, oversized, unsupported, and framework-owned Host/framing rejection before handler entry", forbidden: "authentication/connect/PAC/setup/application record/header_too_large"}
+  - {id: silence_01_pre_handler_framework_rejection, primary_emitter: framework, required: "disconnect, timeout, malformed, oversized, unsupported, and framework-owned Host/framing rejection before handler entry", forbidden: "authentication/connect/PAC/setup/application record"}
   - {id: silence_02_handler_version_or_method_rejection, primary_emitter: public_adapter, required: "handler version or method rejection", forbidden: "connect/auth/PAC"}
   - {id: silence_03_acme_challenge_no_request_telemetry, primary_emitter: tls, required: "ACME challenge handshake", forbidden: "request telemetry"}
   - {id: silence_04_no_certificate_failure_no_request_telemetry, primary_emitter: tls, required: "no certificate failure", forbidden: "request telemetry/log"}

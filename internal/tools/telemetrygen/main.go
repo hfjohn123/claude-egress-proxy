@@ -33,7 +33,8 @@ type metric struct {
 }
 type records struct {
 	Base, Sensitive []string
-	MaxBytes        int `yaml:"max_bytes"`
+	MaxBytes        int      `yaml:"max_bytes"`
+	Tuples          []string `yaml:"tuples"`
 }
 type emission struct {
 	ID             string `yaml:"id"`
@@ -148,7 +149,7 @@ func validate(m manifest) error {
 	if err := validateCases("silence", m.Silence, 12, "silence_"); err != nil {
 		return err
 	}
-	if caseDigest(m.Silence) != "62924d12b8b334981f51c023c55fb4c42605eb57dd917527d2b317007e04829d" {
+	if caseDigest(m.Silence) != "67cac551643162f203e5d78826561458a066b220aa15e5eb888a8329dc7d5b81" {
 		return fmt.Errorf("invalid silence case contract")
 	}
 	if err := validateCases("reload", m.Reload, 7, "reload_"); err != nil {
@@ -165,6 +166,10 @@ func validate(m manifest) error {
 	}
 	if len(m.LimiterPairs) != 12 || len(m.Records.Base) != 4 || len(m.Records.Sensitive) != 6 {
 		return fmt.Errorf("incomplete closed telemetry rows")
+	}
+	wantTuples := []string{"tunnel_closed/clean/info", "tunnel_closed/io_error/error", "tunnel_closed/idle_timeout/info", "tunnel_closed/absolute_lifetime/info", "tunnel_closed/credential_revoked/info", "tunnel_closed/shutdown_deadline/info", "reload/credential_failure/warn", "reload/certificate_failure/warn", "reload/public_self_failure/warn", "reload/source_bind_failure/warn", "reload/acme_failure/warn", "reload/credential_recovered/info", "reload/certificate_recovered/info", "reload/public_self_recovered/info", "reload/source_bind_recovered/info", "reload/acme_recovered/info", "service_state/started/info", "service_state/ready/info", "service_state/draining/info", "service_state/stopped/info", "service_state/credential_store_recovered/info", "service_state/not_ready/warn", "service_state/insecure_loopback/warn", "service_state/dangerous_custom_suffixes/warn", "service_state/credential_store_unavailable/warn", "service_state/startup_failed/error"}
+	if !slices.Equal(m.Records.Tuples, wantTuples) {
+		return fmt.Errorf("invalid closed record tuples")
 	}
 	return nil
 }
@@ -222,7 +227,14 @@ func renderGo(m manifest) ([]byte, error) {
 	}
 	b.WriteString("}\n\ntype EmissionCase struct { ID, PrimaryEmitter, Required, Forbidden string }\n")
 	b.WriteString("type RecordSchema struct { Base, Sensitive []string; MaxBytes int }\n")
+	b.WriteString("type RecordTuple struct { Event, Reason, Level string }\n")
 	fmt.Fprintf(&b, "var GeneratedRecordSchema = RecordSchema{Base:%#v, Sensitive:%#v, MaxBytes:%d}\n", m.Records.Base, m.Records.Sensitive, m.Records.MaxBytes)
+	b.WriteString("var GeneratedRecordTuples = []RecordTuple{\n")
+	for _, tuple := range m.Records.Tuples {
+		p := strings.Split(tuple, "/")
+		fmt.Fprintf(&b, "{Event:%q, Reason:%q, Level:%q},\n", p[0], p[1], p[2])
+	}
+	b.WriteString("}\n")
 	b.WriteString("var ValidLimiterPairs = map[string]bool{\n")
 	for _, pair := range m.LimiterPairs {
 		fmt.Fprintf(&b, "%q:true,\n", pair)
@@ -250,7 +262,11 @@ func renderDocs(m manifest) string {
 			fmt.Fprintf(&b, "\nBuckets: `%s`.\n", strings.Join(x.Buckets, "`, `"))
 		}
 	}
-	b.WriteString("\n## Records\n\nBase fields: `" + strings.Join(m.Records.Base, "`, `") + "`. Sensitive tunnel extension (all-or-none): `" + strings.Join(m.Records.Sensitive, "`, `") + fmt.Sprintf("`. Maximum JSON size: %d bytes.\n", m.Records.MaxBytes))
+	b.WriteString("\n## Records\n\nBase fields: `" + strings.Join(m.Records.Base, "`, `") + "`. Sensitive tunnel extension (all-or-none): `" + strings.Join(m.Records.Sensitive, "`, `") + fmt.Sprintf("`. Maximum JSON size: %d bytes.\n\n| Event | Reason | Level |\n| --- | --- | --- |\n", m.Records.MaxBytes))
+	for _, tuple := range m.Records.Tuples {
+		p := strings.Split(tuple, "/")
+		fmt.Fprintf(&b, "| `%s` | `%s` | `%s` |\n", p[0], p[1], p[2])
+	}
 	renderDocCases(&b, "Primary emission matrix", m.Matrix)
 	renderDocCases(&b, "Deliberate silence", m.Silence)
 	renderDocCases(&b, "Reload cases", m.Reload)

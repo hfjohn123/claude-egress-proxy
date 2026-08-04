@@ -35,8 +35,37 @@ type RecordSchema struct {
 	Base, Sensitive []string
 	MaxBytes        int
 }
+type RecordTuple struct{ Event, Reason, Level string }
 
 var GeneratedRecordSchema = RecordSchema{Base: []string{"timestamp:string:rfc3339nano_utc", "level:string:fixed", "event:string:closed", "reason:string:closed"}, Sensitive: []string{"destination_hostname:string:1..253", "device_identifier:string:1..64", "source_prefix:string:ipv4_24_or_ipv6_64", "duration_ms:uint64", "bytes_client_to_origin:uint64", "bytes_origin_to_client:uint64"}, MaxBytes: 2047}
+var GeneratedRecordTuples = []RecordTuple{
+	{Event: "tunnel_closed", Reason: "clean", Level: "info"},
+	{Event: "tunnel_closed", Reason: "io_error", Level: "error"},
+	{Event: "tunnel_closed", Reason: "idle_timeout", Level: "info"},
+	{Event: "tunnel_closed", Reason: "absolute_lifetime", Level: "info"},
+	{Event: "tunnel_closed", Reason: "credential_revoked", Level: "info"},
+	{Event: "tunnel_closed", Reason: "shutdown_deadline", Level: "info"},
+	{Event: "reload", Reason: "credential_failure", Level: "warn"},
+	{Event: "reload", Reason: "certificate_failure", Level: "warn"},
+	{Event: "reload", Reason: "public_self_failure", Level: "warn"},
+	{Event: "reload", Reason: "source_bind_failure", Level: "warn"},
+	{Event: "reload", Reason: "acme_failure", Level: "warn"},
+	{Event: "reload", Reason: "credential_recovered", Level: "info"},
+	{Event: "reload", Reason: "certificate_recovered", Level: "info"},
+	{Event: "reload", Reason: "public_self_recovered", Level: "info"},
+	{Event: "reload", Reason: "source_bind_recovered", Level: "info"},
+	{Event: "reload", Reason: "acme_recovered", Level: "info"},
+	{Event: "service_state", Reason: "started", Level: "info"},
+	{Event: "service_state", Reason: "ready", Level: "info"},
+	{Event: "service_state", Reason: "draining", Level: "info"},
+	{Event: "service_state", Reason: "stopped", Level: "info"},
+	{Event: "service_state", Reason: "credential_store_recovered", Level: "info"},
+	{Event: "service_state", Reason: "not_ready", Level: "warn"},
+	{Event: "service_state", Reason: "insecure_loopback", Level: "warn"},
+	{Event: "service_state", Reason: "dangerous_custom_suffixes", Level: "warn"},
+	{Event: "service_state", Reason: "credential_store_unavailable", Level: "warn"},
+	{Event: "service_state", Reason: "startup_failed", Level: "error"},
+}
 var ValidLimiterPairs = map[string]bool{
 	"tls_handshake/allowed":             true,
 	"tls_handshake/throttled":           true,
@@ -87,7 +116,7 @@ var MatrixCases = []EmissionCase{
 	{ID: "matrix_33_service_state_transition", PrimaryEmitter: "service", Required: "one matching service_state log; resulting gauges change", Forbidden: ""},
 }
 var SilenceCases = []EmissionCase{
-	{ID: "silence_01_pre_handler_framework_rejection", PrimaryEmitter: "framework", Required: "disconnect, timeout, malformed, oversized, unsupported, and framework-owned Host/framing rejection before handler entry", Forbidden: "authentication/connect/PAC/setup/application record/header_too_large"},
+	{ID: "silence_01_pre_handler_framework_rejection", PrimaryEmitter: "framework", Required: "disconnect, timeout, malformed, oversized, unsupported, and framework-owned Host/framing rejection before handler entry", Forbidden: "authentication/connect/PAC/setup/application record"},
 	{ID: "silence_02_handler_version_or_method_rejection", PrimaryEmitter: "public_adapter", Required: "handler version or method rejection", Forbidden: "connect/auth/PAC"},
 	{ID: "silence_03_acme_challenge_no_request_telemetry", PrimaryEmitter: "tls", Required: "ACME challenge handshake", Forbidden: "request telemetry"},
 	{ID: "silence_04_no_certificate_failure_no_request_telemetry", PrimaryEmitter: "tls", Required: "no certificate failure", Forbidden: "request telemetry/log"},
