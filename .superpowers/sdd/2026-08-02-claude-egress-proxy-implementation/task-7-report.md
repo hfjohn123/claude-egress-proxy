@@ -113,3 +113,11 @@ Focused GREEN command: `go test ./internal/telemetry -run 'Test(MetricsTypedMuta
 Result: passed.
 
 Final verification: `go fmt ./...`, `go generate ./internal/telemetry`, `go run ./internal/tools/telemetrygen -check`, `go mod download`, `go mod verify`, `go test ./...`, `go vet ./...`, `go list -m all`, and `git diff --check` passed. `go test -race ./internal/telemetry -v` could not run: `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`.
+
+## Exhaustive record-contract completion
+
+RED: `go test ./internal/telemetry -run TestSensitiveMetadataGrammarBoundariesAndAtomicRejection` initially exposed a test-only raw-key-order parser defect; after correcting that oracle, the new exhaustive tests passed against the existing record implementation, so no production change was required.
+
+Added independent exhaustive record tests for every close, reload, and service-state enum mapping; invalid enum atomic rejection; UTC RFC3339Nano timestamp boundaries; exact base/extension key order and JSON grammar; uint64 duration/byte exactness through `MaxUint64`; immutable copied record output; sensitive-host/device/prefix boundary grammar including mapped IPv6 rejection; all-or-none invalid extension rejection; and direct oversized internal build rejection.
+
+Verification: focused record suite, `go fmt ./...`, `go generate ./...`, generator `-check`, `go mod download`, `go mod verify`, `go test ./...`, `go vet ./...`, `go list -m all`, and `git diff --check` passed. Race attempt exact limitation: `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`. No record-contract acceptance concern remains.
