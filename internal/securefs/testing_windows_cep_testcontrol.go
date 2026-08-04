@@ -53,3 +53,20 @@ func MarkInspectReparseForTest(root MutableRoot, name string) error {
 	}
 	return nil
 }
+
+// BlockRetainedRotationCallForTest admits one retained-file operation, blocks
+// before its identity syscall, then rechecks the same captured handle.
+func BlockRetainedRotationCallForTest(file RetainedFile, entered chan<- struct{}, release <-chan struct{}) error {
+	w, ok := file.(*windowsRetainedFile)
+	if !ok {
+		return ErrUnsafePath
+	}
+	h, err := w.begin()
+	if err != nil {
+		return err
+	}
+	defer w.end()
+	close(entered)
+	<-release
+	return w.usable(h)
+}

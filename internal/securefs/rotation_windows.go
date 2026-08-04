@@ -17,7 +17,6 @@ import (
 // admitted syscall releases its own handle afterwards, preventing handle reuse
 // races with a concurrent Close.
 type windowsRotationNamespace struct {
-	root       *mutableRoot
 	op         *windowsRoot
 	rootPolicy RootPolicy
 	base       string
@@ -62,6 +61,17 @@ func (r *mutableRoot) AcquireRotationNamespace(ctx context.Context, base string,
 	if err != nil || winCheck(op.fd, rootInfo, Directory, r.policy.Access) != nil {
 		return fail(ErrPermissions)
 	}
+	namespaceRoot, err := duplicateWindowsRotationRoot(op, r.policy)
+	if err != nil {
+		return fail(err)
+	}
+	rootTransferred := false
+	defer func() {
+		if !rootTransferred {
+			_ = namespaceRoot.close()
+		}
+	}()
+	op = namespaceRoot
 	lockPolicy := rotationPolicy(policy, Optional)
 	lockPolicy.MaxBytes = 0
 	lock, created, err := winOpenLock(op, base+".lock", lockPolicy)
@@ -97,11 +107,70 @@ func (r *mutableRoot) AcquireRotationNamespace(ctx context.Context, base string,
 	if err != nil {
 		return fail(err)
 	}
-	ns := &windowsRotationNamespace{root: r, op: op, rootPolicy: r.policy, base: base, leaves: leaves, policy: policy, lock: lock}
+	ns := &windowsRotationNamespace{op: op, rootPolicy: r.policy, base: base, leaves: leaves, policy: policy, lock: lock}
 	tomb.ns = ns
 	ns.tomb = tomb
 	locked, closeLock = false, false
+	rootTransferred = true
+	r.release()
 	return ns, nil
+}
+
+func duplicateWindowsRotationRoot(source *windowsRoot, policy RootPolicy) (*windowsRoot, error) {
+	owned := &windowsRoot{
+		leaf:               source.leaf,
+		path:               source.path,
+		volumeRoot:         source.volumeRoot,
+		id:                 source.id,
+		inspectInfoForTest: source.inspectInfoForTest,
+	}
+	failed := true
+	defer func() {
+		if failed {
+			_ = owned.close()
+		}
+	}()
+	duplicate := func(source windows.Handle) (windows.Handle, error) {
+		if source == 0 {
+			return 0, nil
+		}
+		process := windows.CurrentProcess()
+		var target windows.Handle
+		if err := windows.DuplicateHandle(process, source, process, &target, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+			return 0, ErrUnsafePath
+		}
+		return target, nil
+	}
+	var err error
+	owned.fd, err = duplicate(source.fd)
+	if err != nil {
+		return nil, err
+	}
+	owned.parent, err = duplicate(source.parent)
+	if err != nil {
+		return nil, err
+	}
+	owned.pins = make([]windows.Handle, 0, len(source.pins))
+	for _, pin := range source.pins {
+		copy, err := duplicate(pin)
+		if err != nil {
+			return nil, err
+		}
+		owned.pins = append(owned.pins, copy)
+	}
+	info, err := winInfo(owned.fd)
+	if err != nil || winCheck(owned.fd, info, Directory, policy.Access) != nil {
+		return nil, ErrPermissions
+	}
+	id, err := winIdentity(owned.fd, info)
+	if err != nil || id != source.id {
+		return nil, ErrIdentityChanged
+	}
+	if err := owned.recheck(); err != nil {
+		return nil, err
+	}
+	failed = false
+	return owned, nil
 }
 
 func winFileSize(info windows.ByHandleFileInformation) int64 {
@@ -169,7 +238,10 @@ func (n *windowsRotationNamespace) finishClose() {
 		n.lock = 0
 	}
 	n.tomb.closeDetached()
-	n.root.release()
+	_ = n.op.close()
+	n.op.fd = 0
+	n.op.parent = 0
+	n.op.pins = nil
 }
 func (n *windowsRotationNamespace) RecheckIdentity() error {
 	if err := n.begin(); err != nil {
