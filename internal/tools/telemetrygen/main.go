@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"go/format"
@@ -141,14 +142,26 @@ func validate(m manifest) error {
 	if err := validateCases("matrix", m.Matrix, 33, "matrix_"); err != nil {
 		return err
 	}
+	if caseDigest(m.Matrix) != "d6dbea152de9700dfe2a012232be23c0a74799aca520476e22f787cd7a862a83" {
+		return fmt.Errorf("invalid matrix case contract")
+	}
 	if err := validateCases("silence", m.Silence, 12, "silence_"); err != nil {
 		return err
+	}
+	if caseDigest(m.Silence) != "62924d12b8b334981f51c023c55fb4c42605eb57dd917527d2b317007e04829d" {
+		return fmt.Errorf("invalid silence case contract")
 	}
 	if err := validateCases("reload", m.Reload, 7, "reload_"); err != nil {
 		return err
 	}
+	if caseDigest(m.Reload) != "defb00448deb6e5b4375deba1336df6ef03840600496b85ac53c6c11c1485eac" {
+		return fmt.Errorf("invalid reload case contract")
+	}
 	if err := validateCases("lifecycle", m.Lifecycle, 9, "lifecycle_"); err != nil {
 		return err
+	}
+	if caseDigest(m.Lifecycle) != "7af0f672d5876869a7cf3a4265fdf2f40aab55d8026684c192d912c27dd02f0d" {
+		return fmt.Errorf("invalid lifecycle case contract")
 	}
 	if len(m.LimiterPairs) != 12 || len(m.Records.Base) != 4 || len(m.Records.Sensitive) != 6 {
 		return fmt.Errorf("incomplete closed telemetry rows")
@@ -167,6 +180,14 @@ func validateCases(kind string, rows []emission, want int, prefix string) error 
 		seen[r.ID] = true
 	}
 	return nil
+}
+
+func caseDigest(rows []emission) string {
+	h := sha256.New()
+	for _, row := range rows {
+		fmt.Fprintf(h, "%q\x00%q\x00%q\x00%q\x00", row.ID, row.PrimaryEmitter, row.Required, row.Forbidden)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 func validateIDs(kind string, rows []string, want int, prefix string) error {
 	if len(rows) != want {
