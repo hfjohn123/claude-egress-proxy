@@ -99,6 +99,22 @@ func TestLoggerSubmitHasNoProducerLockOrGoroutine(t *testing.T) {
 	}
 }
 
+func TestLoggerProducerHelpersHaveNoRetryLoops(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	b, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, name := range []string{"joinEpoch", "publishTicketCore"} {
+		start := strings.Index(s, "func (l *Logger) "+name)
+		end := strings.Index(s[start:], "\nfunc ") + start
+		if strings.Contains(s[start:end], "for ") || strings.Contains(s[start:end], "CompareAndSwap") {
+			t.Fatalf("%s retries", name)
+		}
+	}
+}
+
 func TestLoggerShutdownWaitsForReservedProducerPublication(t *testing.T) {
 	clock := newManualClock(time.Unix(0, 0))
 	m := loggerMetrics(t)
@@ -155,6 +171,38 @@ func TestLoggerWaitQuiescentSnapshotsTailOnce(t *testing.T) {
 	// Hook was one-shot. This later submission must not join the old snapshot.
 	l.Submit(Record{json: `{"later":true}`})
 	l.WaitQuiescent()
+}
+
+func TestLoggerWaitQuiescentExcludesLaterEpoch(t *testing.T) {
+	clock := newManualClock(time.Unix(0, 0))
+	m := loggerMetrics(t)
+	sink := newScriptedSink()
+	l := NewLogger(clock, m, sink)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	installTicketPause(t, l, entered, release)
+	old := l.epoch.Load()
+	firstDone := make(chan struct{})
+	go func() { l.Submit(Record{json: `{"first":true}`}); close(firstDone) }()
+	<-entered
+	quiescent := make(chan struct{})
+	go func() { l.WaitQuiescent(); close(quiescent) }()
+	for l.epoch.Load() == old {
+		runtime.Gosched()
+	}
+	l.Submit(Record{json: `{"later":true}`})
+	close(release)
+	<-firstDone
+	<-sink.started
+	sink.result <- nil
+	<-sink.started // later record is now blocked in WriteRecord
+	<-quiescent
+	if got := sink.calls(); got != 2 {
+		t.Fatalf("calls=%d", got)
+	}
+	sink.result <- nil
+	l.WaitQuiescent()
+	l.Shutdown(context.Background())
 }
 
 func TestLoggerSourceHasNoBusyTailSpin(t *testing.T) {

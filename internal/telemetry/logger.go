@@ -36,7 +36,9 @@ type Logger struct {
 
 	gate        atomic.Uint32
 	publication atomic.Uint32
+	joining     atomic.Uint32
 	epoch       atomic.Pointer[loggerEpoch]
+	owners      [256]atomic.Pointer[loggerEpoch]
 	tail        atomic.Uint64
 	terminal    atomic.Uint64
 
@@ -50,8 +52,6 @@ type Logger struct {
 
 type loggerEpoch struct {
 	active atomic.Uint32
-	target atomic.Uint64
-	closed atomic.Bool
 }
 
 func NewLogger(clock timebase.Clock, metrics *Metrics, sink Sink) *Logger {
@@ -236,14 +236,11 @@ func (l *Logger) failGate() {
 	l.stateMu.Unlock()
 }
 func (l *Logger) joinEpoch() *loggerEpoch {
+	l.joining.Add(1)
 	epoch := l.epoch.Load()
 	epoch.active.Add(1)
-	if !epoch.closed.Load() {
-		return epoch
-	}
-	epoch.active.Add(^uint32(0))
-	epoch = l.epoch.Load()
-	epoch.active.Add(1)
+	l.joining.Add(^uint32(0))
+	l.signal(l.quiescent)
 	return epoch
 }
 func (l *Logger) leaveEpoch(epoch *loggerEpoch) {
@@ -251,13 +248,8 @@ func (l *Logger) leaveEpoch(epoch *loggerEpoch) {
 	l.signal(l.quiescent)
 }
 func (l *Logger) publishTicketCore(ticket uint64, b string, epoch *loggerEpoch) {
-	for target := epoch.target.Load(); target < ticket+1; {
-		if epoch.target.CompareAndSwap(target, ticket+1) {
-			break
-		}
-		target = epoch.target.Load()
-	}
 	i := ticket % 256
+	l.owners[i].Store(epoch)
 	copy(l.slots[i][:], b)
 	l.lens[i].Store(uint32(len(b)))
 	l.published[i].Store(ticket + 1)

@@ -68,10 +68,12 @@ its old admission side, so a later submission could extend a prior
 `WaitQuiescent` target. It also used unbounded producer CAS loops, and the
 ordinary build retained a named pause seam.
 
-GREEN: each admission epoch now owns its active count, closure bit, and maximum
-accepted ticket target. Tagged quiescence swaps epochs, closes/waits the old
-epoch, then waits only its recorded target. `Submit` uses bounded epoch joining
-and leaves with a single atomic decrement. Shutdown stores its rejecting gate
+GREEN: each admission epoch now owns only an active count. `Submit` joins with
+fixed atomic increments and no retry loop; tagged quiescence swaps epochs,
+drains the fixed join window and old active count, then scans the fixed 256
+slot-owner table for the old epoch's exact terminal target. A deterministic
+regression proves a later-epoch blocked write cannot extend the earlier
+snapshot. Shutdown stores its rejecting gate
 while holding the state lock, then installs its budget before releasing that
 lock, so the supervisor cannot observe partial state. Publication is routed
 through build-specific methods: ordinary code only invokes the core publisher;

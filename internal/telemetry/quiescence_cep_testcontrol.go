@@ -7,11 +7,20 @@ func (l *Logger) WaitQuiescent() {
 	l.waitMu.Lock()
 	defer l.waitMu.Unlock()
 	old := l.epoch.Swap(&loggerEpoch{})
-	old.closed.Store(true)
+	for l.joining.Load() != 0 {
+		<-l.quiescent
+	}
 	for old.active.Load() != 0 {
 		<-l.quiescent
 	}
-	target := old.target.Load()
+	var target uint64
+	for i := range l.owners {
+		owner := l.owners[i].Load()
+		published := l.published[i].Load()
+		if owner == old && owner == l.owners[i].Load() && published > target {
+			target = published
+		}
+	}
 	for l.terminal.Load() < target {
 		<-l.quiescent
 	}
