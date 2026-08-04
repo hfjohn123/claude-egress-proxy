@@ -27,25 +27,47 @@ func TestEmissionMatrixHasOneClosedOwnerPerCase(t *testing.T) {
 			t.Fatalf("reload[%d] = %+v, want %+v", i, got, want)
 		}
 	}
-	if len(LifecycleCases) != 9 {
-		t.Fatalf("lifecycle cases = %d, want 9", len(LifecycleCases))
+	wantLifecycle := []struct{ id, owner, required, forbidden string }{
+		{"lifecycle_01_initial_startup", "service", "optional insecure_loopback; started; optional dangerous_custom_suffixes; optional credential_store_unavailable; initial ready or not_ready", ""},
+		{"lifecycle_02_runtime_credential_loss", "service", "reload/credential_failure; credential_store_unavailable; conditional not_ready", ""},
+		{"lifecycle_03_runtime_credential_recovery", "service", "reload/credential_recovered; credential_store_recovered; conditional ready", ""},
+		{"lifecycle_04_initial_absence_first_publication", "service", "credential success; credential_store_recovered; conditional ready", "reload log"},
+		{"lifecycle_05_drain", "service", "draining; resulting not_ready", ""},
+		{"lifecycle_06_orderly_stop", "service", "stopped final orderly service record", ""},
+		{"lifecycle_07_fatal_prestart", "service", "startup_failed only", "started/readiness/drain/stopped"},
+		{"lifecycle_08_noncredential_failure_readiness", "service", "failure log before resulting conditional not_ready", ""},
+		{"lifecycle_09_noncredential_recovery_readiness", "service", "recovery log before resulting conditional ready", ""},
 	}
-	if got := LifecycleCases[1]; got.Required != "reload/credential_failure; credential_store_unavailable; conditional not_ready" || got.Forbidden != "" {
-		t.Fatalf("credential loss = %+v", got)
+	if len(LifecycleCases) != len(wantLifecycle) {
+		t.Fatalf("lifecycle cases = %d, want %d", len(LifecycleCases), len(wantLifecycle))
 	}
-	if got := LifecycleCases[6]; got.Required != "startup_failed only" || got.Forbidden != "started/readiness/drain/stopped" {
-		t.Fatalf("fatal prestart = %+v", got)
+	for i, want := range wantLifecycle {
+		got := LifecycleCases[i]
+		if got.ID != want.id || got.PrimaryEmitter != want.owner || got.Required != want.required || got.Forbidden != want.forbidden {
+			t.Fatalf("lifecycle[%d] = %+v, want %+v", i, got, want)
+		}
 	}
-	if len(SilenceCases) != 12 {
-		t.Fatalf("silence cases = %d, want 12", len(SilenceCases))
+	wantSilence := []struct{ id, owner, required, forbidden string }{
+		{"silence_01_pre_handler_framework_rejection", "framework", "disconnect, timeout, malformed, oversized, unsupported, and framework-owned Host/framing rejection before handler entry", "authentication/connect/PAC/setup/application record/header_too_large"},
+		{"silence_02_handler_version_or_method_rejection", "public_adapter", "handler version or method rejection", "connect/auth/PAC"},
+		{"silence_03_acme_challenge_no_request_telemetry", "tls", "ACME challenge handshake", "request telemetry"},
+		{"silence_04_no_certificate_failure_no_request_telemetry", "tls", "no certificate failure", "request telemetry/log"},
+		{"silence_05_admin_per_request", "admin", "admin request", "per-request application metric/log"},
+		{"silence_06_pac_capacity_no_limiter", "pac", "PAC capacity", "limiter event"},
+		{"silence_07_auth_challenge_no_limiter", "authentication", "auth challenge", "authentication-limiter event"},
+		{"silence_08_valid_credential_no_auth_limiter", "authentication", "auth valid", "authentication-limiter event"},
+		{"silence_09_unchanged_reload_poll", "reload", "unchanged poll", "reload metric/log"},
+		{"silence_10_reload_success_no_log", "reload", "reload success", "reload log"},
+		{"silence_11_repeated_reload_failure_no_repeat_log", "reload", "later changed failure in same episode", "repeat failure log"},
+		{"silence_12_initial_safe_credential_absence_no_reload_log", "reload", "initial safe credential absence", "reload metric/log"},
 	}
-	if got := SilenceCases[0]; got.PrimaryEmitter != "framework" || got.Required != "disconnect, timeout, malformed, oversized, unsupported, and framework-owned Host/framing rejection before handler entry" || got.Forbidden != "authentication/connect/PAC/setup/application record/header_too_large" {
-		t.Fatalf("framework silence = %+v", got)
+	if len(SilenceCases) != len(wantSilence) {
+		t.Fatalf("silence cases = %d, want %d", len(SilenceCases), len(wantSilence))
 	}
-	if got := SilenceCases[5]; got.Required != "PAC capacity" || got.Forbidden != "limiter event" {
-		t.Fatalf("PAC capacity silence = %+v", got)
-	}
-	if got := SilenceCases[10]; got.Required != "later changed failure in same episode" || got.Forbidden != "repeat failure log" {
-		t.Fatalf("repeat failure silence = %+v", got)
+	for i, want := range wantSilence {
+		got := SilenceCases[i]
+		if got.ID != want.id || got.PrimaryEmitter != want.owner || got.Required != want.required || got.Forbidden != want.forbidden {
+			t.Fatalf("silence[%d] = %+v, want %+v", i, got, want)
+		}
 	}
 }
