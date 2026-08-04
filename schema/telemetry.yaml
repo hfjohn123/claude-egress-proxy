@@ -23,51 +23,67 @@ records:
   sensitive: [destination_hostname:string:1..253, device_identifier:string:1..64, source_prefix:string:ipv4_24_or_ipv6_64, duration_ms:uint64, bytes_client_to_origin:uint64, bytes_origin_to_client:uint64]
   max_bytes: 2047
 matrix:
-  - {id: matrix_01_production_mapped_admission, primary_emitter: admission}
-  - {id: matrix_02_production_overflow_admission, primary_emitter: admission}
-  - {id: matrix_03_production_admission_denied, primary_emitter: admission}
-  - {id: matrix_04_loopback_mapped_or_overflow_admission, primary_emitter: admission}
-  - {id: matrix_05_loopback_admission_denied, primary_emitter: admission}
-  - {id: matrix_06_acme_challenge_handshake_complete, primary_emitter: tls}
-  - {id: matrix_07_no_certificate_nonchallenge_rejected, primary_emitter: tls}
-  - {id: matrix_08_other_production_tls_terminal, primary_emitter: tls}
-  - {id: matrix_09_pre_handler_framework_rejection, primary_emitter: framework}
-  - {id: matrix_10_public_structural_rejection, primary_emitter: public_adapter}
-  - {id: matrix_11_public_version_or_method_rejection, primary_emitter: public_adapter}
-  - {id: matrix_12_pac_disabled_or_not_found, primary_emitter: pac}
-  - {id: matrix_13_pac_rate_denial, primary_emitter: pac}
-  - {id: matrix_14_pac_map_capacity_denial, primary_emitter: pac}
-  - {id: matrix_15_pac_work_capacity_denial, primary_emitter: pac}
-  - {id: matrix_16_pac_admission_success, primary_emitter: pac}
-  - {id: matrix_17_store_unavailable_before_authentication, primary_emitter: authentication}
-  - {id: matrix_18_authorization_absent, primary_emitter: authentication}
-  - {id: matrix_19_invalid_authentication_admitted, primary_emitter: authentication}
-  - {id: matrix_20_invalid_authentication_throttled, primary_emitter: authentication}
-  - {id: matrix_21_invalid_unknown_prefix_map_full, primary_emitter: authentication}
-  - {id: matrix_22_valid_credential, primary_emitter: authentication}
-  - {id: matrix_23_post_valid_malformed_authority, primary_emitter: setup}
-  - {id: matrix_24_other_post_valid_setup_failure, primary_emitter: setup}
-  - {id: matrix_25_pending_to_established, primary_emitter: setup}
-  - {id: matrix_26_post_commit_handoff_failure, primary_emitter: tunnel}
-  - {id: matrix_27_established_tunnel_terminal, primary_emitter: tunnel}
-  - {id: matrix_28_admin_request_silence, primary_emitter: admin}
-  - {id: matrix_29_limiter_entry_expired, primary_emitter: limiter_maintenance}
-  - {id: matrix_30_reload_success, primary_emitter: reload}
-  - {id: matrix_31_reload_failure, primary_emitter: reload}
-  - {id: matrix_32_reload_recovered, primary_emitter: reload}
-  - {id: matrix_33_service_state_transition, primary_emitter: service}
+  - {id: matrix_01_production_mapped_admission, primary_emitter: admission, required: "limiter tls_handshake/allowed; later TLS row also applies", forbidden: ""}
+  - {id: matrix_02_production_overflow_admission, primary_emitter: admission, required: "limiter tls_handshake/saturation_overflow; later TLS row also applies", forbidden: ""}
+  - {id: matrix_03_production_admission_denied, primary_emitter: admission, required: "TLS rate_limited; limiter tls_handshake/throttled", forbidden: ""}
+  - {id: matrix_04_loopback_mapped_or_overflow_admission, primary_emitter: admission, required: "limiter tls_handshake/allowed or tls_handshake/saturation_overflow", forbidden: "TLS counter"}
+  - {id: matrix_05_loopback_admission_denied, primary_emitter: admission, required: "limiter tls_handshake/throttled", forbidden: "TLS counter"}
+  - {id: matrix_06_acme_challenge_handshake_complete, primary_emitter: tls, required: "TLS success; pre-auth release", forbidden: "HTTP/auth/connect/PAC/setup/log"}
+  - {id: matrix_07_no_certificate_nonchallenge_rejected, primary_emitter: tls, required: "TLS tls_error; pre-auth release; zero HTTP bytes", forbidden: "request telemetry/log"}
+  - {id: matrix_08_other_production_tls_terminal, primary_emitter: tls, required: "TLS success, timeout, or tls_error matching terminal", forbidden: ""}
+  - {id: matrix_09_pre_handler_framework_rejection, primary_emitter: framework, required: "no application classification", forbidden: "further primary emission"}
+  - {id: matrix_10_public_structural_rejection, primary_emitter: public_adapter, required: "connect malformed_request", forbidden: "auth/setup"}
+  - {id: matrix_11_public_version_or_method_rejection, primary_emitter: public_adapter, required: "no connect/auth/PAC emission", forbidden: "connect/auth/PAC"}
+  - {id: matrix_12_pac_disabled_or_not_found, primary_emitter: pac, required: "PAC disabled or not_found", forbidden: ""}
+  - {id: matrix_13_pac_rate_denial, primary_emitter: pac, required: "PAC prefix_rate_limited or global_rate_limited; limiter pac/throttled", forbidden: ""}
+  - {id: matrix_14_pac_map_capacity_denial, primary_emitter: pac, required: "PAC map_capacity; limiter pac/map_full", forbidden: ""}
+  - {id: matrix_15_pac_work_capacity_denial, primary_emitter: pac, required: "PAC capacity", forbidden: "limiter event"}
+  - {id: matrix_16_pac_admission_success, primary_emitter: pac, required: "PAC served; limiter pac/allowed; before response I/O", forbidden: ""}
+  - {id: matrix_17_store_unavailable_before_authentication, primary_emitter: authentication, required: "auth store_unavailable", forbidden: "verifier/limiter/connect/setup"}
+  - {id: matrix_18_authorization_absent, primary_emitter: authentication, required: "auth challenge", forbidden: "authentication-limiter event"}
+  - {id: matrix_19_invalid_authentication_admitted, primary_emitter: authentication, required: "auth invalid; limiter authentication/allowed", forbidden: ""}
+  - {id: matrix_20_invalid_authentication_throttled, primary_emitter: authentication, required: "auth throttled; limiter authentication/throttled", forbidden: ""}
+  - {id: matrix_21_invalid_unknown_prefix_map_full, primary_emitter: authentication, required: "auth map_capacity; limiter authentication/map_full", forbidden: ""}
+  - {id: matrix_22_valid_credential, primary_emitter: authentication, required: "auth valid; create pre_admission; start setup timer", forbidden: "auth-limiter event"}
+  - {id: matrix_23_post_valid_malformed_authority, primary_emitter: setup, required: "connect malformed_request; setup failure", forbidden: ""}
+  - {id: matrix_24_other_post_valid_setup_failure, primary_emitter: setup, required: "matching connect result; setup failure", forbidden: ""}
+  - {id: matrix_25_pending_to_established, primary_emitter: setup, required: "connect established; setup success", forbidden: ""}
+  - {id: matrix_26_post_commit_handoff_failure, primary_emitter: tunnel, required: "retain connect established; io_error close row", forbidden: ""}
+  - {id: matrix_27_established_tunnel_terminal, primary_emitter: tunnel, required: "close result; mapped tunnel duration; both final byte increments including zero; release; tunnel_closed record", forbidden: ""}
+  - {id: matrix_28_admin_request_silence, primary_emitter: admin, required: "no per-request application metric or log", forbidden: "per-request application metric/log"}
+  - {id: matrix_29_limiter_entry_expired, primary_emitter: limiter_maintenance, required: "limiter entry_expired for that limiter", forbidden: ""}
+  - {id: matrix_30_reload_success, primary_emitter: reload, required: "reload success for kind", forbidden: "reload log"}
+  - {id: matrix_31_reload_failure, primary_emitter: reload, required: "reload failure; episode entry adds matching failure log", forbidden: ""}
+  - {id: matrix_32_reload_recovered, primary_emitter: reload, required: "reload recovered; matching recovery log", forbidden: "additional success"}
+  - {id: matrix_33_service_state_transition, primary_emitter: service, required: "one matching service_state log; resulting gauges change", forbidden: ""}
 silence:
-  - {id: silence_01_pre_handler_framework_rejection, primary_emitter: framework}
-  - {id: silence_02_handler_version_or_method_rejection, primary_emitter: public_adapter}
-  - {id: silence_03_acme_challenge_no_request_telemetry, primary_emitter: tls}
-  - {id: silence_04_no_certificate_failure_no_request_telemetry, primary_emitter: tls}
-  - {id: silence_05_admin_per_request, primary_emitter: admin}
-  - {id: silence_06_pac_capacity_no_limiter, primary_emitter: pac}
-  - {id: silence_07_auth_challenge_no_limiter, primary_emitter: authentication}
-  - {id: silence_08_valid_credential_no_auth_limiter, primary_emitter: authentication}
-  - {id: silence_09_unchanged_reload_poll, primary_emitter: reload}
-  - {id: silence_10_reload_success_no_log, primary_emitter: reload}
-  - {id: silence_11_repeated_reload_failure_no_repeat_log, primary_emitter: reload}
-  - {id: silence_12_initial_safe_credential_absence_no_reload_log, primary_emitter: reload}
-reload: [reload_01_unchanged_poll, reload_02_first_failure, reload_03_later_changed_failure, reload_04_first_success_after_failure, reload_05_initial_safe_absence, reload_06_first_publication_after_absence, reload_07_scheduled_public_self_source_bind_acme_attempt]
-lifecycle: [lifecycle_01_initial_startup, lifecycle_02_runtime_credential_loss, lifecycle_03_runtime_credential_recovery, lifecycle_04_initial_absence_first_publication, lifecycle_05_drain, lifecycle_06_orderly_stop, lifecycle_07_fatal_prestart, lifecycle_08_noncredential_failure_readiness, lifecycle_09_noncredential_recovery_readiness]
+  - {id: silence_01_pre_handler_framework_rejection, primary_emitter: framework, required: "disconnect, timeout, malformed, oversized, unsupported, and framework-owned Host/framing rejection before handler entry", forbidden: "authentication/connect/PAC/setup/application record/header_too_large"}
+  - {id: silence_02_handler_version_or_method_rejection, primary_emitter: public_adapter, required: "handler version or method rejection", forbidden: "connect/auth/PAC"}
+  - {id: silence_03_acme_challenge_no_request_telemetry, primary_emitter: tls, required: "ACME challenge handshake", forbidden: "request telemetry"}
+  - {id: silence_04_no_certificate_failure_no_request_telemetry, primary_emitter: tls, required: "no certificate failure", forbidden: "request telemetry/log"}
+  - {id: silence_05_admin_per_request, primary_emitter: admin, required: "admin request", forbidden: "per-request application metric/log"}
+  - {id: silence_06_pac_capacity_no_limiter, primary_emitter: pac, required: "PAC capacity", forbidden: "limiter event"}
+  - {id: silence_07_auth_challenge_no_limiter, primary_emitter: authentication, required: "auth challenge", forbidden: "authentication-limiter event"}
+  - {id: silence_08_valid_credential_no_auth_limiter, primary_emitter: authentication, required: "auth valid", forbidden: "authentication-limiter event"}
+  - {id: silence_09_unchanged_reload_poll, primary_emitter: reload, required: "unchanged poll", forbidden: "reload metric/log"}
+  - {id: silence_10_reload_success_no_log, primary_emitter: reload, required: "reload success", forbidden: "reload log"}
+  - {id: silence_11_repeated_reload_failure_no_repeat_log, primary_emitter: reload, required: "later changed failure in same episode", forbidden: "repeat failure log"}
+  - {id: silence_12_initial_safe_credential_absence_no_reload_log, primary_emitter: reload, required: "initial safe credential absence", forbidden: "reload metric/log"}
+reload:
+  - {id: reload_01_unchanged_poll, primary_emitter: reload, required: "unchanged identity, metadata, or digest emits nothing", forbidden: "reload metric/log"}
+  - {id: reload_02_first_failure, primary_emitter: reload, required: "kind failure metric; matching failure log", forbidden: ""}
+  - {id: reload_03_later_changed_failure, primary_emitter: reload, required: "failure metric", forbidden: "repeat failure log"}
+  - {id: reload_04_first_success_after_failure, primary_emitter: reload, required: "recovered metric; matching recovery log", forbidden: "success"}
+  - {id: reload_05_initial_safe_absence, primary_emitter: reload, required: "initial safe credential absence", forbidden: "reload metric/log"}
+  - {id: reload_06_first_publication_after_absence, primary_emitter: reload, required: "credential success; no reload log; initial-absence recovery lifecycle", forbidden: "reload log"}
+  - {id: reload_07_scheduled_public_self_source_bind_acme_attempt, primary_emitter: reload, required: "each scheduled public-self/source-bind check and bounded ACME try is one attempt", forbidden: ""}
+lifecycle:
+  - {id: lifecycle_01_initial_startup, primary_emitter: service, required: "optional insecure_loopback; started; optional dangerous_custom_suffixes; optional credential_store_unavailable; initial ready or not_ready", forbidden: ""}
+  - {id: lifecycle_02_runtime_credential_loss, primary_emitter: service, required: "reload/credential_failure; credential_store_unavailable; conditional not_ready", forbidden: ""}
+  - {id: lifecycle_03_runtime_credential_recovery, primary_emitter: service, required: "reload/credential_recovered; credential_store_recovered; conditional ready", forbidden: ""}
+  - {id: lifecycle_04_initial_absence_first_publication, primary_emitter: service, required: "credential success; credential_store_recovered; conditional ready", forbidden: "reload log"}
+  - {id: lifecycle_05_drain, primary_emitter: service, required: "draining; resulting not_ready", forbidden: ""}
+  - {id: lifecycle_06_orderly_stop, primary_emitter: service, required: "stopped final orderly service record", forbidden: ""}
+  - {id: lifecycle_07_fatal_prestart, primary_emitter: service, required: "startup_failed only", forbidden: "started/readiness/drain/stopped"}
+  - {id: lifecycle_08_noncredential_failure_readiness, primary_emitter: service, required: "failure log before resulting conditional not_ready", forbidden: ""}
+  - {id: lifecycle_09_noncredential_recovery_readiness, primary_emitter: service, required: "recovery log before resulting conditional ready", forbidden: ""}

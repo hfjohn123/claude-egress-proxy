@@ -23,8 +23,8 @@ type manifest struct {
 	Records      records    `yaml:"records"`
 	Matrix       []emission `yaml:"matrix"`
 	Silence      []emission `yaml:"silence"`
-	Reload       []string   `yaml:"reload"`
-	Lifecycle    []string   `yaml:"lifecycle"`
+	Reload       []emission `yaml:"reload"`
+	Lifecycle    []emission `yaml:"lifecycle"`
 }
 type metric struct {
 	Name, Type, Help        string
@@ -37,7 +37,8 @@ type records struct {
 type emission struct {
 	ID             string `yaml:"id"`
 	PrimaryEmitter string `yaml:"primary_emitter"`
-	Emission       string `yaml:"emission"`
+	Required       string `yaml:"required"`
+	Forbidden      string `yaml:"forbidden"`
 }
 
 func main() {
@@ -143,10 +144,10 @@ func validate(m manifest) error {
 	if err := validateCases("silence", m.Silence, 12, "silence_"); err != nil {
 		return err
 	}
-	if err := validateIDs("reload", m.Reload, 7, "reload_"); err != nil {
+	if err := validateCases("reload", m.Reload, 7, "reload_"); err != nil {
 		return err
 	}
-	if err := validateIDs("lifecycle", m.Lifecycle, 9, "lifecycle_"); err != nil {
+	if err := validateCases("lifecycle", m.Lifecycle, 9, "lifecycle_"); err != nil {
 		return err
 	}
 	if len(m.LimiterPairs) != 12 || len(m.Records.Base) != 4 || len(m.Records.Sensitive) != 6 {
@@ -160,7 +161,7 @@ func validateCases(kind string, rows []emission, want int, prefix string) error 
 	}
 	seen := map[string]bool{}
 	for _, r := range rows {
-		if !strings.HasPrefix(r.ID, prefix) || r.PrimaryEmitter == "" || seen[r.ID] {
+		if !strings.HasPrefix(r.ID, prefix) || r.PrimaryEmitter == "" || r.Required == "" || seen[r.ID] {
 			return fmt.Errorf("invalid %s row %q", kind, r.ID)
 		}
 		seen[r.ID] = true
@@ -198,7 +199,7 @@ func renderGo(m manifest) ([]byte, error) {
 		}
 		b.WriteString("},\n")
 	}
-	b.WriteString("}\n\ntype EmissionCase struct { ID, PrimaryEmitter, Emission string }\n")
+	b.WriteString("}\n\ntype EmissionCase struct { ID, PrimaryEmitter, Required, Forbidden string }\n")
 	b.WriteString("type RecordSchema struct { Base, Sensitive []string; MaxBytes int }\n")
 	fmt.Fprintf(&b, "var GeneratedRecordSchema = RecordSchema{Base:%#v, Sensitive:%#v, MaxBytes:%d}\n", m.Records.Base, m.Records.Sensitive, m.Records.MaxBytes)
 	b.WriteString("var ValidLimiterPairs = map[string]bool{\n")
@@ -208,21 +209,14 @@ func renderGo(m manifest) ([]byte, error) {
 	b.WriteString("}\n")
 	renderCases(&b, "MatrixCases", m.Matrix)
 	renderCases(&b, "SilenceCases", m.Silence)
-	renderIDs(&b, "ReloadCases", m.Reload, "reload")
-	renderIDs(&b, "LifecycleCases", m.Lifecycle, "service")
+	renderCases(&b, "ReloadCases", m.Reload)
+	renderCases(&b, "LifecycleCases", m.Lifecycle)
 	return format.Source([]byte(b.String()))
 }
 func renderCases(b *strings.Builder, name string, rows []emission) {
 	fmt.Fprintf(b, "var %s = []EmissionCase{\n", name)
 	for _, r := range rows {
-		fmt.Fprintf(b, "{ID:%q, PrimaryEmitter:%q, Emission:%q},\n", r.ID, r.PrimaryEmitter, r.Emission)
-	}
-	b.WriteString("}\n")
-}
-func renderIDs(b *strings.Builder, name string, rows []string, owner string) {
-	fmt.Fprintf(b, "var %s = []EmissionCase{\n", name)
-	for _, id := range rows {
-		fmt.Fprintf(b, "{ID:%q, PrimaryEmitter:%q},\n", id, owner)
+		fmt.Fprintf(b, "{ID:%q, PrimaryEmitter:%q, Required:%q, Forbidden:%q},\n", r.ID, r.PrimaryEmitter, r.Required, r.Forbidden)
 	}
 	b.WriteString("}\n")
 }
@@ -238,20 +232,14 @@ func renderDocs(m manifest) string {
 	b.WriteString("\n## Records\n\nBase fields: `" + strings.Join(m.Records.Base, "`, `") + "`. Sensitive tunnel extension (all-or-none): `" + strings.Join(m.Records.Sensitive, "`, `") + fmt.Sprintf("`. Maximum JSON size: %d bytes.\n", m.Records.MaxBytes))
 	renderDocCases(&b, "Primary emission matrix", m.Matrix)
 	renderDocCases(&b, "Deliberate silence", m.Silence)
-	renderDocIDs(&b, "Reload cases", m.Reload)
-	renderDocIDs(&b, "Lifecycle cases", m.Lifecycle)
+	renderDocCases(&b, "Reload cases", m.Reload)
+	renderDocCases(&b, "Lifecycle cases", m.Lifecycle)
 	return b.String()
 }
 func renderDocCases(b *strings.Builder, title string, rows []emission) {
-	b.WriteString("\n## " + title + "\n\n| ID | Owner | Emission |\n| --- | --- | --- |\n")
+	b.WriteString("\n## " + title + "\n\n| ID | Owner | Required | Forbidden |\n| --- | --- | --- | --- |\n")
 	for _, r := range rows {
-		fmt.Fprintf(b, "| `%s` | `%s` | %s |\n", r.ID, r.PrimaryEmitter, r.Emission)
-	}
-}
-func renderDocIDs(b *strings.Builder, title string, rows []string) {
-	b.WriteString("\n## " + title + "\n\n")
-	for _, r := range rows {
-		fmt.Fprintf(b, "- `%s`\n", r)
+		fmt.Fprintf(b, "| `%s` | `%s` | %s | %s |\n", r.ID, r.PrimaryEmitter, r.Required, r.Forbidden)
 	}
 }
 func findRoot() (string, error) {
