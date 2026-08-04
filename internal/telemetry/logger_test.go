@@ -295,13 +295,18 @@ func TestLoggerShutdownDeadlineDropsActiveAndQueuedInFIFO(t *testing.T) {
 	for i := 0; i < 255; i++ {
 		l.Submit(Record{json: `{"n":1}`})
 	}
+	l.Submit(Record{json: `{"stopped":true}`})
+	if got := l.tail.Load(); got != 256 {
+		t.Fatalf("tail=%d", got)
+	}
+	if got := string(l.slots[255][:l.lens[255].Load()]); got != `{"stopped":true}` {
+		t.Fatalf("last record=%q", got)
+	}
 	<-sink.started
 	<-clock.created // first call timer
 	shutdown := make(chan struct{})
 	go func() { l.Shutdown(context.Background()); close(shutdown) }()
 	<-clock.created // shutdown timer
-	// The shutdown gate is closed: this final record is the FIFO-last drop.
-	l.Submit(Record{json: `{"stopped":true}`})
 	for i := 0; i < 4; i++ {
 		clock.Advance(249 * time.Millisecond)
 		sink.result <- nil
@@ -318,6 +323,110 @@ func TestLoggerShutdownDeadlineDropsActiveAndQueuedInFIFO(t *testing.T) {
 	}
 	if sink.calls() != 5 || sink.closeCalls() != 1 {
 		t.Fatalf("calls=%d closes=%d", sink.calls(), sink.closeCalls())
+	}
+	l.Submit(Record{json: `{"after":true}`})
+	l.WaitQuiescent()
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "dropped_shutdown_deadline"); got != 253 {
+		t.Fatalf("post-gate shutdown=%v", got)
+	}
+}
+
+func TestLoggerDeadlineDoesNotMutateBlockedWriterBytes(t *testing.T) {
+	clock := newManualClock(time.Unix(0, 0))
+	m := loggerMetrics(t)
+	sink := newRetainedBlockedSink()
+	l := NewLogger(clock, m, sink)
+	const record = `{"immutable":true}`
+	l.Submit(Record{json: record})
+	<-sink.started
+	<-clock.created
+	clock.Advance(250 * time.Millisecond)
+	l.WaitQuiescent()
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "dropped_sink_failed"); got != 1 {
+		t.Fatalf("failed=%v", got)
+	}
+	if got := sink.retainedString(); got != record {
+		t.Fatalf("retained=%q", got)
+	}
+	if sink.calls() != 1 || sink.closeCalls() != 1 {
+		t.Fatalf("calls=%d closes=%d", sink.calls(), sink.closeCalls())
+	}
+	l.Submit(Record{json: `{"later":true}`})
+	l.WaitQuiescent()
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "dropped_sink_failed"); got != 2 {
+		t.Fatalf("later failed=%v", got)
+	}
+	if sink.calls() != 1 {
+		t.Fatalf("calls=%d", sink.calls())
+	}
+	sink.releaseCall()
+	<-sink.returned
+	if got := sink.retainedString(); got != record {
+		t.Fatalf("retained after return=%q", got)
+	}
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "dropped_sink_failed"); got != 2 || sink.closeCalls() != 1 {
+		t.Fatalf("failed=%v closes=%d", got, sink.closeCalls())
+	}
+}
+
+func TestLoggerConcurrentShutdownSharesDeadlineCloseAndResult(t *testing.T) {
+	clock := newManualClock(time.Unix(0, 0))
+	m := loggerMetrics(t)
+	sink := newRetainedBlockedSink()
+	l := NewLogger(clock, m, sink)
+	l.Submit(Record{json: `{"active":true}`})
+	<-sink.started
+	<-clock.created // call deadline
+	const callers = 4
+	done := make(chan struct{}, callers)
+	for range callers {
+		go func() { l.Shutdown(context.Background()); done <- struct{}{} }()
+	}
+	<-clock.created // shared shutdown deadline
+	clock.Advance(time.Second)
+	for range callers {
+		<-done
+	}
+	l.WaitQuiescent()
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "dropped_shutdown_deadline"); got != 1 {
+		t.Fatalf("shutdown=%v", got)
+	}
+	if sink.closeCalls() != 1 || sink.calls() != 1 {
+		t.Fatalf("calls=%d closes=%d", sink.calls(), sink.closeCalls())
+	}
+	select {
+	case d := <-clock.created:
+		t.Fatalf("unexpected timer=%v", d)
+	default:
+	}
+	sink.releaseCall()
+	<-sink.returned
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "dropped_shutdown_deadline"); got != 1 || sink.closeCalls() != 1 {
+		t.Fatalf("shutdown=%v closes=%d", got, sink.closeCalls())
+	}
+}
+
+func TestLoggerTestControlSourceIsTaggedAndLimited(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	dir := strings.TrimSuffix(file, "logger_test.go")
+	control, err := os.ReadFile(dir + "quiescence_cep_testcontrol.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(control), "//go:build cep_testcontrol\n") {
+		t.Fatal("missing exact cep_testcontrol build tag")
+	}
+	if got := strings.Count(string(control), "func (l *Logger) "); got != 1 || !strings.Contains(string(control), "func (l *Logger) WaitQuiescent()") {
+		t.Fatalf("test-control methods=%d", got)
+	}
+	for _, name := range []string{"logger.go", "sink.go", "sink_stream.go"} {
+		b, err := os.ReadFile(dir + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "WaitQuiescent") || strings.Contains(string(b), "TestControl") {
+			t.Fatalf("ordinary source %s exposes test control", name)
+		}
 	}
 }
 
@@ -448,6 +557,40 @@ func (s *scriptedSink) WriteRecord(b []byte) error {
 func (s *scriptedSink) Close() error    { s.mu.Lock(); defer s.mu.Unlock(); s.closes++; return nil }
 func (s *scriptedSink) calls() int      { s.mu.Lock(); defer s.mu.Unlock(); return len(s.records) }
 func (s *scriptedSink) closeCalls() int { s.mu.Lock(); defer s.mu.Unlock(); return s.closes }
+
+type retainedBlockedSink struct {
+	started  chan struct{}
+	release  chan struct{}
+	returned chan struct{}
+	mu       sync.Mutex
+	retained []byte
+	callsN   int
+	closes   int
+	once     sync.Once
+}
+
+func newRetainedBlockedSink() *retainedBlockedSink {
+	return &retainedBlockedSink{started: make(chan struct{}, 1), release: make(chan struct{}), returned: make(chan struct{}, 1)}
+}
+func (s *retainedBlockedSink) WriteRecord(b []byte) error {
+	s.mu.Lock()
+	s.retained = b // Deliberately retain the logger-owned slice without copying.
+	s.callsN++
+	s.mu.Unlock()
+	s.started <- struct{}{}
+	<-s.release
+	s.returned <- struct{}{}
+	return nil
+}
+func (s *retainedBlockedSink) Close() error { s.mu.Lock(); defer s.mu.Unlock(); s.closes++; return nil }
+func (s *retainedBlockedSink) releaseCall() { s.once.Do(func() { close(s.release) }) }
+func (s *retainedBlockedSink) retainedString() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return string(s.retained)
+}
+func (s *retainedBlockedSink) calls() int      { s.mu.Lock(); defer s.mu.Unlock(); return s.callsN }
+func (s *retainedBlockedSink) closeCalls() int { s.mu.Lock(); defer s.mu.Unlock(); return s.closes }
 
 func newGateSink() *gateSink {
 	return &gateSink{started: make(chan struct{}, 1), release: make(chan struct{})}
