@@ -119,6 +119,21 @@ func TestValidateFileSinkStartupMatrixAndBounds(t *testing.T) {
 	}
 }
 
+func TestValidActiveLinesTailWindowBoundary(t *testing.T) {
+	prefix := oracleRecord(t, 0)
+	for _, test := range []struct {
+		suffix int
+		repair bool
+		ok     bool
+	}{{2047, true, true}, {2048, false, false}} {
+		data := append(append([]byte(nil), prefix...), bytes.Repeat([]byte("x"), test.suffix)...)
+		repair, ok := validActiveLines(data)
+		if repair != test.repair || ok != test.ok {
+			t.Fatalf("suffix %d: validActiveLines = (%v, %v), want (%v, %v)", test.suffix, repair, ok, test.repair, test.ok)
+		}
+	}
+}
+
 func setFakeGeneration(n *fakeRotationNamespace, present [3]bool, data []byte) {
 	for i, name := range []string{n.base, n.base + ".1", n.base + ".2"} {
 		if present[i] {

@@ -474,7 +474,7 @@ func validActiveLines(data []byte) (repair, ok bool) {
 	if last < 0 {
 		return len(data) <= GeneratedRecordSchema.MaxBytes, len(data) <= GeneratedRecordSchema.MaxBytes
 	}
-	if len(data)-last-1 > 2048 || !validCompleteLines(data[:last+1]) {
+	if len(data)-last-1 > GeneratedRecordSchema.MaxBytes || !validCompleteLines(data[:last+1]) {
 		return false, false
 	}
 	if last == len(data)-1 {
