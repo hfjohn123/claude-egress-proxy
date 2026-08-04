@@ -84,14 +84,16 @@ func TestLoggerConcurrentAdmissionUsesAllCapacity(t *testing.T) {
 
 func TestLoggerSubmitHasNoProducerLockOrGoroutine(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
-	b, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(file), "publish_ticket.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(b)
 	start := strings.Index(s, "func (l *Logger) Submit")
-	end := strings.Index(s[start:], "\nfunc (l *Logger) Shutdown") + start
-	body := s[start:end]
+	if start < 0 {
+		t.Fatal("missing Submit")
+	}
+	body := s[start:]
 	for _, forbidden := range []string{"stateMu.Lock", "sync.Mutex", "sync.RWMutex", "sync.Cond", "go func"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("Submit contains %q", forbidden)
@@ -103,7 +105,7 @@ func TestLoggerProducerHelpersHaveNoRetryLoops(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	dir := filepath.Dir(file)
 	for _, check := range []struct{ file, name string }{
-		{filepath.Join(dir, "publish_ticket.go"), "joinEpoch"},
+		{filepath.Join(dir, "publish_ticket.go"), "Submit"},
 		{filepath.Join(dir, "logger.go"), "publishTicketCore"},
 	} {
 		b, err := os.ReadFile(check.file)
@@ -192,15 +194,12 @@ func TestLoggerWaitQuiescentExcludesLaterEpoch(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
 	installTicketPause(t, l, entered, release)
-	oldLane := uint32(l.handoff.Load() & 1)
 	firstDone := make(chan struct{})
 	go func() { l.Submit(Record{json: `{"first":true}`}); close(firstDone) }()
 	<-entered
 	quiescent := make(chan struct{})
 	go func() { l.WaitQuiescent(); close(quiescent) }()
-	for uint32(l.handoff.Load()&1) == oldLane {
-		runtime.Gosched()
-	}
+	waitSnapshotHeld(l)
 	l.Submit(Record{json: `{"later":true}`})
 	close(release)
 	<-firstDone
@@ -216,7 +215,7 @@ func TestLoggerWaitQuiescentExcludesLaterEpoch(t *testing.T) {
 	l.Shutdown(context.Background())
 }
 
-func TestLoggerWaitQuiescentWaitsForClassifiedJoin(t *testing.T) {
+func TestLoggerWaitQuiescentWaitsForUnlinkedSnapshotNode(t *testing.T) {
 	clock := newManualClock(time.Unix(0, 0))
 	m := loggerMetrics(t)
 	sink := newScriptedSink()
@@ -227,15 +226,12 @@ func TestLoggerWaitQuiescentWaitsForClassifiedJoin(t *testing.T) {
 	submitted := make(chan struct{})
 	go func() { l.Submit(Record{json: `{"joined":true}`}); close(submitted) }()
 	<-entered
-	oldLane := uint32(l.handoff.Load() & 1)
 	quiescent := make(chan struct{})
 	go func() { l.WaitQuiescent(); close(quiescent) }()
-	for uint32(l.handoff.Load()&1) == oldLane {
-		runtime.Gosched()
-	}
+	waitSnapshotHeld(l)
 	select {
 	case <-quiescent:
-		t.Fatal("quiescent before classified join registered")
+		t.Fatal("quiescent before snapshot node linked")
 	default:
 	}
 	close(release)
@@ -251,6 +247,32 @@ func TestLoggerWaitQuiescentWaitsForClassifiedJoin(t *testing.T) {
 	l.Shutdown(context.Background())
 }
 
+func TestLoggerWaitQuiescentExcludesPostSnapshotUnlinkedNode(t *testing.T) {
+	clock := newManualClock(time.Unix(0, 0))
+	m := loggerMetrics(t)
+	sink := newScriptedSink()
+	l := NewLogger(clock, m, sink)
+	l.Submit(Record{json: `{"first":true}`})
+	<-sink.started
+	quiescent := make(chan struct{})
+	go func() { l.WaitQuiescent(); close(quiescent) }()
+	waitSnapshotHeld(l)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	installJoinPause(t, l, entered, release)
+	laterDone := make(chan struct{})
+	go func() { l.Submit(Record{json: `{"later":true}`}); close(laterDone) }()
+	<-entered
+	sink.result <- nil
+	<-quiescent
+	close(release)
+	<-laterDone
+	<-sink.started
+	sink.result <- nil
+	l.WaitQuiescent()
+	l.Shutdown(context.Background())
+}
+
 func TestLoggerSourceHasNoBusyTailSpin(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	b, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
@@ -260,6 +282,14 @@ func TestLoggerSourceHasNoBusyTailSpin(t *testing.T) {
 	s := string(b)
 	if strings.Contains(s, "runtime.Gosched") {
 		t.Fatal("busy tail spin")
+	}
+}
+
+func waitSnapshotHeld(l *Logger) {
+	state := snapshotState(l)
+	for state.mu.TryLock() {
+		state.mu.Unlock()
+		runtime.Gosched()
 	}
 }
 

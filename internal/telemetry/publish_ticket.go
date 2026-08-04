@@ -2,15 +2,28 @@
 
 package telemetry
 
-func (l *Logger) joinEpoch() uint32 {
-	state := l.handoff.Add(2)
-	lane := uint32(state & 1)
-	l.active[lane].Add(1)
-	l.handoff.Add(^uint64(1))
-	l.signal(l.quiescent)
-	return lane
-}
-
-func (l *Logger) publishTicket(ticket uint64, b string, lane uint32) {
-	l.publishTicketCore(ticket, b, lane)
+func (l *Logger) Submit(record Record) {
+	b := record.JSON()
+	if !validLoggerRecord(b) {
+		panic(ErrInvalidRecord)
+	}
+	if gate := l.gate.Load(); gate != loggerAccepting {
+		l.record(l.gateResult(gate))
+		return
+	}
+	select {
+	case l.capacity <- struct{}{}:
+	default:
+		l.record(delivery("dropped_queue_full"))
+		return
+	}
+	l.publication.Add(1)
+	defer func() { l.publication.Add(^uint32(0)); l.signal(l.notify); l.signal(l.progress) }()
+	if gate := l.gate.Load(); gate != loggerAccepting {
+		<-l.capacity
+		l.record(l.gateResult(gate))
+		return
+	}
+	ticket := l.tail.Add(1) - 1
+	l.publishTicketCore(ticket, b)
 }

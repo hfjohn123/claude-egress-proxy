@@ -93,3 +93,24 @@ for classified joiners to register, drains the old lane, and scans fixed slot
 ownership for its terminal target. Producer admission has no mutex, retry loop,
 or contention drop. A tagged pause between classification and lane registration
 proves the snapshot cannot return before that record's delivery result.
+
+## Review fix round 4
+
+RED: the packed handoff still shared its transient join count across both
+lanes. A producer classified after the snapshot could pause before lane
+registration and delay the old snapshot indefinitely.
+
+CONTRACT: exact prefix tracking for unbounded, out-of-order concurrent calls is
+incompatible with both finite metadata and wait-free producers. The fixed
+storage, no-per-submit-allocation, and zero-wait guarantees therefore apply to
+the ordinary product build. The explicitly tagged test-control build may
+allocate one tracking node per `Submit`; no tracking state or code is compiled
+into the ordinary build.
+
+GREEN: tagged submissions append nodes through one atomic MPSC exchange.
+`WaitQuiescent` captures one tail node, waits only that prefix, and derives its
+accepted terminal target from those nodes. Later linked or deliberately
+unlinked nodes cannot extend the snapshot. Ordinary `Submit` is now a separate
+build-selected implementation with fixed storage, no lock, no retry loop, no
+tracking allocation, and no test-control symbol. Deterministic tests cover an
+unlinked old node and an unlinked post-snapshot node.

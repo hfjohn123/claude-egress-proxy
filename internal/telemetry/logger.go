@@ -30,20 +30,15 @@ type Logger struct {
 	capacity  chan struct{}
 	notify    chan struct{}
 	progress  chan struct{}
-	quiescent chan struct{}
 	callDone  chan error
 	done      chan struct{}
 
 	gate        atomic.Uint32
 	publication atomic.Uint32
-	handoff     atomic.Uint64
-	active      [2]atomic.Uint32
-	owners      [256]atomic.Uint32
 	tail        atomic.Uint64
 	terminal    atomic.Uint64
 
 	stateMu          sync.Mutex // Shutdown, failure, and supervisor only; Submit never takes it.
-	waitMu           sync.Mutex // Auxiliary callers only; Submit never takes it.
 	shutdown         bool
 	shutdownDeadline time.Time
 	shutdownTimer    timebase.Timer
@@ -54,7 +49,7 @@ func NewLogger(clock timebase.Clock, metrics *Metrics, sink Sink) *Logger {
 	if clock == nil || metrics == nil {
 		panic(loggerInvalid)
 	}
-	l := &Logger{clock: clock, metrics: metrics, sink: sink, capacity: make(chan struct{}, 256), notify: make(chan struct{}, 1), progress: make(chan struct{}, 1), quiescent: make(chan struct{}, 1), callDone: make(chan error, 1), done: make(chan struct{})}
+	l := &Logger{clock: clock, metrics: metrics, sink: sink, capacity: make(chan struct{}, 256), notify: make(chan struct{}, 1), progress: make(chan struct{}, 1), callDone: make(chan error, 1), done: make(chan struct{})}
 	if sink == nil {
 		l.gate.Store(loggerFailed)
 		close(l.done)
@@ -62,34 +57,6 @@ func NewLogger(clock timebase.Clock, metrics *Metrics, sink Sink) *Logger {
 	}
 	go l.supervise()
 	return l
-}
-
-func (l *Logger) Submit(record Record) {
-	b := record.JSON()
-	if !validLoggerRecord(b) {
-		panic(ErrInvalidRecord)
-	}
-	lane := l.joinEpoch()
-	defer l.leaveEpoch(lane)
-	if gate := l.gate.Load(); gate != loggerAccepting {
-		l.record(l.gateResult(gate))
-		return
-	}
-	select {
-	case l.capacity <- struct{}{}:
-	default:
-		l.record(delivery("dropped_queue_full"))
-		return
-	}
-	l.publication.Add(1)
-	defer func() { l.publication.Add(^uint32(0)); l.signal(l.notify); l.signal(l.progress) }()
-	if gate := l.gate.Load(); gate != loggerAccepting {
-		<-l.capacity
-		l.record(l.gateResult(gate))
-		return
-	}
-	ticket := l.tail.Add(1) - 1
-	l.publishTicket(ticket, b, lane)
 }
 
 func (l *Logger) Shutdown(ctx context.Context) {
@@ -206,7 +173,6 @@ func (l *Logger) supervise() {
 				l.terminal.Add(1)
 				<-l.capacity
 				l.signal(l.progress)
-				l.signal(l.quiescent)
 				active = ^uint64(0)
 				continue
 			}
@@ -230,13 +196,8 @@ func (l *Logger) failGate() {
 	}
 	l.stateMu.Unlock()
 }
-func (l *Logger) leaveEpoch(lane uint32) {
-	l.active[lane].Add(^uint32(0))
-	l.signal(l.quiescent)
-}
-func (l *Logger) publishTicketCore(ticket uint64, b string, lane uint32) {
+func (l *Logger) publishTicketCore(ticket uint64, b string) {
 	i := ticket % 256
-	l.owners[i].Store(lane + 1)
 	copy(l.slots[i][:], b)
 	l.lens[i].Store(uint32(len(b)))
 	l.published[i].Store(ticket + 1)
@@ -248,7 +209,6 @@ func (l *Logger) terminalize(result contract.DeliveryResult, tail uint64) {
 	}
 	l.terminal.Store(tail)
 	l.signal(l.progress)
-	l.signal(l.quiescent)
 	l.closeSink()
 }
 func (l *Logger) closeSink() {

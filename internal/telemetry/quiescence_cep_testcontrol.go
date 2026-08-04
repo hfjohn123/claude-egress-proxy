@@ -4,30 +4,31 @@ package telemetry
 
 // WaitQuiescent waits for records admitted or rejected before its snapshot.
 func (l *Logger) WaitQuiescent() {
-	l.waitMu.Lock()
-	defer l.waitMu.Unlock()
-	state := l.handoff.Load()
-	oldLane := uint32(state & 1)
-	if oldLane == 0 {
-		l.handoff.Add(1)
-	} else {
-		l.handoff.Add(^uint64(0))
-	}
-	for l.handoff.Load()>>1 != 0 {
-		<-l.quiescent
-	}
-	for l.active[oldLane].Load() != 0 {
-		<-l.quiescent
-	}
+	state := snapshotState(l)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	targetNode := state.tail.Load()
+	node := state.cursor
 	target := l.terminal.Load()
-	for i := range l.owners {
-		owner := l.owners[i].Load()
-		published := l.published[i].Load()
-		if owner == oldLane+1 && owner == l.owners[i].Load() && published > target {
-			target = published
+	for node != targetNode {
+		next := node.next.Load()
+		for next == nil {
+			<-state.quiescent
+			next = node.next.Load()
+		}
+		node = next
+		for !node.done.Load() {
+			<-state.quiescent
+		}
+		if accepted := node.target.Load(); accepted > target {
+			target = accepted
 		}
 	}
+	if state.cursor != targetNode {
+		state.cursor.next.Store(nil)
+		state.cursor = targetNode
+	}
 	for l.terminal.Load() < target {
-		<-l.quiescent
+		<-l.progress
 	}
 }
