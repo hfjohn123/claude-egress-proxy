@@ -49,10 +49,21 @@ func TestFrameHEADGoldens(t *testing.T) {
 		body, want string
 	}{
 		{FrameBadRequest, "", "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
+		{FrameForbidden, "", "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
+		{FrameNotFound, "", "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
 		{FrameMethodNotAllowedConnect, "", "HTTP/1.1 405 Method Not Allowed\r\nAllow: CONNECT\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
+		{FrameMethodNotAllowedGet, "", "HTTP/1.1 405 Method Not Allowed\r\nAllow: GET\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
 		{FrameProxyAuthenticationRequired, "", "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"claude-egress-proxy\"\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
 		{FrameTooManyRequests, "", "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
+		{FrameInternalError, "", "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
+		{FrameBadGateway, "", "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
+		{FrameServiceUnavailable, "", "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
+		{FrameGatewayTimeout, "", "HTTP/1.1 504 Gateway Timeout\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
+		{FrameHTTPVersionNotSupported, "", "HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
 		{FramePACOK, "x", "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"},
+		{FrameHealthOK, "", "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
+		{FrameReadyOK, "", "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
+		{FrameNotReady, "", "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
 		{FrameMetricsUnauthorized, "", "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"metrics\"\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"},
 		{FrameMetricsOK, "# x\n", "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nConnection: close\r\n\r\n"},
 	}
