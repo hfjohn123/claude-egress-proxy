@@ -45,17 +45,6 @@ type windowsRetainedFile struct {
 	active int
 }
 
-func validRotationNamespace(base string, leaves [3]string, policy FilePolicy) bool {
-	return validLeaf(base) && leaves[0] == base && leaves[1] == base+".1" && leaves[2] == base+".2" &&
-		validLeaf(leaves[0]) && validLeaf(leaves[1]) && validLeaf(leaves[2]) &&
-		leaves[0] != leaves[1] && leaves[1] != leaves[2] && validMutableEntryPolicy(policy) && policy.Presence == Optional
-}
-
-func rotationPolicy(policy FilePolicy, presence Presence) FilePolicy {
-	policy.Presence = presence
-	return policy
-}
-
 func (r *mutableRoot) AcquireRotationNamespace(ctx context.Context, base string, leaves [3]string, policy FilePolicy) (RotationNamespace, error) {
 	if ctx == nil || !validRotationNamespace(base, leaves, policy) {
 		return nil, ErrUnsafePath
