@@ -5,6 +5,9 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,6 +50,86 @@ func TestLoggerCapacityAndFIFOOwnCopiedBytes(t *testing.T) {
 	l.WaitQuiescent()
 	if len(sink.records) != 256 || string(sink.records[0]) != string(first) {
 		t.Fatalf("records=%d first=%q", len(sink.records), sink.records[0])
+	}
+}
+
+func TestLoggerConcurrentAdmissionUsesAllCapacity(t *testing.T) {
+	m := loggerMetrics(t)
+	sink := newGateSink()
+	l := NewLogger(newManualClock(time.Unix(0, 0)), m, sink)
+	l.Submit(Record{json: `{"n":0}`})
+	<-sink.started
+	const total = 260
+	start := make(chan struct{})
+	done := make(chan struct{}, total)
+	for i := 1; i < total; i++ {
+		go func() { <-start; l.Submit(Record{json: `{"n":1}`}); done <- struct{}{} }()
+	}
+	close(start)
+	for i := 1; i < total; i++ {
+		<-done
+	}
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "dropped_queue_full"); got != 4 {
+		t.Fatalf("queue full=%v", got)
+	}
+	sink.unblock()
+	l.Shutdown(context.Background())
+	l.WaitQuiescent()
+	if got := len(sink.records); got != 256 {
+		t.Fatalf("written=%d", got)
+	}
+}
+
+func TestLoggerSubmitHasNoProducerLockOrGoroutine(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	b, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	start := strings.Index(s, "func (l *Logger) Submit")
+	end := strings.Index(s[start:], "\nfunc (l *Logger) Shutdown") + start
+	body := s[start:end]
+	for _, forbidden := range []string{"stateMu.Lock", "sync.Mutex", "sync.RWMutex", "sync.Cond", "go func"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("Submit contains %q", forbidden)
+		}
+	}
+}
+
+func TestLoggerShutdownWaitsForReservedProducerPublication(t *testing.T) {
+	clock := newManualClock(time.Unix(0, 0))
+	m := loggerMetrics(t)
+	sink := newGateSink()
+	l := NewLogger(clock, m, sink)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	if err := l.PauseAfterTicketForTest(entered, release); err != nil {
+		t.Fatal(err)
+	}
+	submitted := make(chan struct{})
+	go func() { l.Submit(Record{json: `{"a":1}`}); close(submitted) }()
+	<-entered
+	shutdown := make(chan struct{})
+	go func() { l.Shutdown(context.Background()); close(shutdown) }()
+	select {
+	case <-shutdown:
+		t.Fatal("shutdown completed before reserved ticket published")
+	default:
+	}
+	close(release)
+	<-submitted
+	<-sink.started
+	sink.unblock()
+	<-shutdown
+	l.WaitQuiescent()
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "written"); got != 1 {
+		t.Fatalf("written=%v", got)
+	}
+	l.Submit(Record{json: `{"later":true}`})
+	l.WaitQuiescent()
+	if got := counterValue(t, m, "claude_proxy_log_records_total", "result", "dropped_shutdown_deadline"); got != 1 {
+		t.Fatalf("frozen=%v", got)
 	}
 }
 

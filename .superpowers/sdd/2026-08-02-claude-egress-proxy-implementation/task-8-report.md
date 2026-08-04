@@ -17,3 +17,9 @@ records still receive sink-failed; exact one-second shutdown wins ties.
 
 GREEN: tagged quiescence now uses one constructor-owned condition variable;
 terminal delivery no longer allocates/replaces a notification channel.
+
+GREEN: replaced producer mutex admission with atomic gate/ticket publication,
+fixed 256-token semaphore, and fixed notification channels. Shutdown/failure
+wait for in-flight producers before snapshotting the accepted tail; tagged tests
+cover concurrent capacity admission, static producer lock/goroutine absence,
+and a reserved-ticket shutdown publication barrier.
