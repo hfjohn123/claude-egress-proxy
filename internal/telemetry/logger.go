@@ -36,9 +36,9 @@ type Logger struct {
 
 	gate        atomic.Uint32
 	publication atomic.Uint32
-	joining     atomic.Uint32
-	epoch       atomic.Pointer[loggerEpoch]
-	owners      [256]atomic.Pointer[loggerEpoch]
+	handoff     atomic.Uint64
+	active      [2]atomic.Uint32
+	owners      [256]atomic.Uint32
 	tail        atomic.Uint64
 	terminal    atomic.Uint64
 
@@ -50,16 +50,11 @@ type Logger struct {
 	closed           bool
 }
 
-type loggerEpoch struct {
-	active atomic.Uint32
-}
-
 func NewLogger(clock timebase.Clock, metrics *Metrics, sink Sink) *Logger {
 	if clock == nil || metrics == nil {
 		panic(loggerInvalid)
 	}
 	l := &Logger{clock: clock, metrics: metrics, sink: sink, capacity: make(chan struct{}, 256), notify: make(chan struct{}, 1), progress: make(chan struct{}, 1), quiescent: make(chan struct{}, 1), callDone: make(chan error, 1), done: make(chan struct{})}
-	l.epoch.Store(&loggerEpoch{})
 	if sink == nil {
 		l.gate.Store(loggerFailed)
 		close(l.done)
@@ -74,8 +69,8 @@ func (l *Logger) Submit(record Record) {
 	if !validLoggerRecord(b) {
 		panic(ErrInvalidRecord)
 	}
-	epoch := l.joinEpoch()
-	defer l.leaveEpoch(epoch)
+	lane := l.joinEpoch()
+	defer l.leaveEpoch(lane)
 	if gate := l.gate.Load(); gate != loggerAccepting {
 		l.record(l.gateResult(gate))
 		return
@@ -94,7 +89,7 @@ func (l *Logger) Submit(record Record) {
 		return
 	}
 	ticket := l.tail.Add(1) - 1
-	l.publishTicket(ticket, b, epoch)
+	l.publishTicket(ticket, b, lane)
 }
 
 func (l *Logger) Shutdown(ctx context.Context) {
@@ -235,21 +230,13 @@ func (l *Logger) failGate() {
 	}
 	l.stateMu.Unlock()
 }
-func (l *Logger) joinEpoch() *loggerEpoch {
-	l.joining.Add(1)
-	epoch := l.epoch.Load()
-	epoch.active.Add(1)
-	l.joining.Add(^uint32(0))
-	l.signal(l.quiescent)
-	return epoch
-}
-func (l *Logger) leaveEpoch(epoch *loggerEpoch) {
-	epoch.active.Add(^uint32(0))
+func (l *Logger) leaveEpoch(lane uint32) {
+	l.active[lane].Add(^uint32(0))
 	l.signal(l.quiescent)
 }
-func (l *Logger) publishTicketCore(ticket uint64, b string, epoch *loggerEpoch) {
+func (l *Logger) publishTicketCore(ticket uint64, b string, lane uint32) {
 	i := ticket % 256
-	l.owners[i].Store(epoch)
+	l.owners[i].Store(lane + 1)
 	copy(l.slots[i][:], b)
 	l.lens[i].Store(uint32(len(b)))
 	l.published[i].Store(ticket + 1)

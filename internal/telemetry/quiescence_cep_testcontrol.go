@@ -6,18 +6,24 @@ package telemetry
 func (l *Logger) WaitQuiescent() {
 	l.waitMu.Lock()
 	defer l.waitMu.Unlock()
-	old := l.epoch.Swap(&loggerEpoch{})
-	for l.joining.Load() != 0 {
+	state := l.handoff.Load()
+	oldLane := uint32(state & 1)
+	if oldLane == 0 {
+		l.handoff.Add(1)
+	} else {
+		l.handoff.Add(^uint64(0))
+	}
+	for l.handoff.Load()>>1 != 0 {
 		<-l.quiescent
 	}
-	for old.active.Load() != 0 {
+	for l.active[oldLane].Load() != 0 {
 		<-l.quiescent
 	}
-	var target uint64
+	target := l.terminal.Load()
 	for i := range l.owners {
 		owner := l.owners[i].Load()
 		published := l.published[i].Load()
-		if owner == old && owner == l.owners[i].Load() && published > target {
+		if owner == oldLane+1 && owner == l.owners[i].Load() && published > target {
 			target = published
 		}
 	}

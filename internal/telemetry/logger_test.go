@@ -101,15 +101,26 @@ func TestLoggerSubmitHasNoProducerLockOrGoroutine(t *testing.T) {
 
 func TestLoggerProducerHelpersHaveNoRetryLoops(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
-	b, err := os.ReadFile(strings.TrimSuffix(file, "_test.go") + ".go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(b)
-	for _, name := range []string{"joinEpoch", "publishTicketCore"} {
+	dir := filepath.Dir(file)
+	for _, check := range []struct{ file, name string }{
+		{filepath.Join(dir, "publish_ticket.go"), "joinEpoch"},
+		{filepath.Join(dir, "logger.go"), "publishTicketCore"},
+	} {
+		b, err := os.ReadFile(check.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		name := check.name
 		start := strings.Index(s, "func (l *Logger) "+name)
-		end := strings.Index(s[start:], "\nfunc ") + start
-		if strings.Contains(s[start:end], "for ") || strings.Contains(s[start:end], "CompareAndSwap") {
+		if start < 0 {
+			t.Fatalf("missing %s", name)
+		}
+		body := s[start:]
+		if end := strings.Index(body, "\nfunc "); end >= 0 {
+			body = body[:end]
+		}
+		if strings.Contains(body, "for ") || strings.Contains(body, "CompareAndSwap") {
 			t.Fatalf("%s retries", name)
 		}
 	}
@@ -181,13 +192,13 @@ func TestLoggerWaitQuiescentExcludesLaterEpoch(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
 	installTicketPause(t, l, entered, release)
-	old := l.epoch.Load()
+	oldLane := uint32(l.handoff.Load() & 1)
 	firstDone := make(chan struct{})
 	go func() { l.Submit(Record{json: `{"first":true}`}); close(firstDone) }()
 	<-entered
 	quiescent := make(chan struct{})
 	go func() { l.WaitQuiescent(); close(quiescent) }()
-	for l.epoch.Load() == old {
+	for uint32(l.handoff.Load()&1) == oldLane {
 		runtime.Gosched()
 	}
 	l.Submit(Record{json: `{"later":true}`})
@@ -202,6 +213,41 @@ func TestLoggerWaitQuiescentExcludesLaterEpoch(t *testing.T) {
 	}
 	sink.result <- nil
 	l.WaitQuiescent()
+	l.Shutdown(context.Background())
+}
+
+func TestLoggerWaitQuiescentWaitsForClassifiedJoin(t *testing.T) {
+	clock := newManualClock(time.Unix(0, 0))
+	m := loggerMetrics(t)
+	sink := newScriptedSink()
+	l := NewLogger(clock, m, sink)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	installJoinPause(t, l, entered, release)
+	submitted := make(chan struct{})
+	go func() { l.Submit(Record{json: `{"joined":true}`}); close(submitted) }()
+	<-entered
+	oldLane := uint32(l.handoff.Load() & 1)
+	quiescent := make(chan struct{})
+	go func() { l.WaitQuiescent(); close(quiescent) }()
+	for uint32(l.handoff.Load()&1) == oldLane {
+		runtime.Gosched()
+	}
+	select {
+	case <-quiescent:
+		t.Fatal("quiescent before classified join registered")
+	default:
+	}
+	close(release)
+	<-submitted
+	<-sink.started
+	select {
+	case <-quiescent:
+		t.Fatal("quiescent before admitted record completed")
+	default:
+	}
+	sink.result <- nil
+	<-quiescent
 	l.Shutdown(context.Background())
 }
 

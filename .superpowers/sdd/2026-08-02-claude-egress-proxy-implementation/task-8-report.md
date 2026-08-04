@@ -80,3 +80,16 @@ through build-specific methods: ordinary code only invokes the core publisher;
 the tagged variant supplies logger-scoped deterministic pausing. The ordinary
 source audit now enumerates all files selected by an ordinary `go/build` and
 rejects test-control, pause, and hook seams.
+
+## Review fix round 3
+
+RED: review found a producer could increment the join counter before a
+quiescence snapshot, then load the new epoch after the snapshot flip. The wait
+drained the short join window but excluded that already-entered submission.
+
+GREEN: a single packed atomic RMW now both enters the handoff and classifies the
+producer into one of two lanes. Tagged quiescence flips only the lane bit, waits
+for classified joiners to register, drains the old lane, and scans fixed slot
+ownership for its terminal target. Producer admission has no mutex, retry loop,
+or contention drop. A tagged pause between classification and lane registration
+proves the snapshot cannot return before that record's delivery result.
