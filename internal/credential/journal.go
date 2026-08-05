@@ -62,6 +62,11 @@ func selectCheckpoint(journal [checkpointJournalBytes]byte, instance [16]byte) (
 		var raw [checkpointSlotBytes]byte
 		copy(raw[:], journal[i*checkpointSlotBytes:(i+1)*checkpointSlotBytes])
 		slots[i], valid[i] = decodeCheckpoint(raw, instance)
+		// Slot identity is part of the authenticated record. A valid slot
+		// copied into the other physical half is not a checkpoint for that half.
+		if valid[i] && slots[i].slot != uint8(i) {
+			valid[i] = false
+		}
 	}
 	if !valid[0] && !valid[1] {
 		return checkpoint{}, false

@@ -56,3 +56,17 @@ func TestSelectCheckpointRejectsEqualGenerationConflict(t *testing.T) {
 		t.Fatal("equal generation conflict accepted")
 	}
 }
+
+func TestSelectCheckpointRejectsSlotInWrongPhysicalPosition(t *testing.T) {
+	var instance [16]byte
+	digest := sha256.Sum256([]byte("store"))
+	slot, err := encodeCheckpoint(1, instance, 1, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journal [checkpointJournalBytes]byte
+	copy(journal[:checkpointSlotBytes], slot[:]) // slot 1 forged into slot 0.
+	if _, ok := selectCheckpoint(journal, instance); ok {
+		t.Fatal("wrong physical slot accepted")
+	}
+}

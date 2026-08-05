@@ -147,58 +147,62 @@ func (r *Repository) CommitSuccessor(ctx context.Context, successor ValidatedSna
 	if successor.Generation() == 0 || successor.Generation() > (1<<53)-1 {
 		return ErrGenerationExhausted
 	}
+	return normalizeStoreError(r.root.WithExclusiveLock(ctx, lockName, lockPolicy(r.policy), func(lock securefs.LockedFile) error {
+		return r.commitLocked(ctx, lock, successor)
+	}))
+}
+
+func (r *Repository) commitLocked(ctx context.Context, lock securefs.LockedFile, successor ValidatedSnapshot) error {
 	data, err := EncodeCanonical(successor)
 	if err != nil {
 		return ErrInvalid
 	}
-	return normalizeStoreError(r.root.WithExclusiveLock(ctx, lockName, lockPolicy(r.policy), func(lock securefs.LockedFile) error {
-		in, err := inspectFiles(lock, r.instance, r.policy)
-		if err != nil {
+	in, err := inspectFiles(lock, r.instance, r.policy)
+	if err != nil {
+		return err
+	}
+	if in.State == StoreSuccessor || in.State == StoreInterruptedBootstrap {
+		if err := writeCheckpoint(lock, r.instance, in.Snapshot, r.policy); err != nil {
 			return err
 		}
-		if in.State == StoreSuccessor || in.State == StoreInterruptedBootstrap {
-			if err := writeCheckpoint(lock, r.instance, in.Snapshot, r.policy); err != nil {
-				return err
-			}
-			in.State = StoreCoherent
-		}
-		if in.State == StoreConflict {
-			return ErrRollbackConflict
-		}
-		if in.State != StoreVirgin && in.State != StoreCoherent {
-			return ErrNotReconciled
-		}
-		if in.State == StoreVirgin {
-			// A permanent lock starts with an explicit generation-zero absence
-			// checkpoint. This makes a crash between lock creation and first store
-			// publication distinguishable from an unsafe missing target.
-			if err := writeVirginCheckpoint(lock, r.instance); err != nil {
-				return err
-			}
-		}
-		current := uint64(0)
-		if in.State == StoreCoherent {
-			current = in.Snapshot.Generation()
-		}
-		if current >= (1<<53)-1 {
-			return ErrGenerationExhausted
-		}
-		if successor.Generation() != current+1 {
-			return ErrRollbackConflict
-		}
-		mode := securefs.AbsentTarget
-		if in.State == StoreCoherent {
-			mode = securefs.PresentTarget
-		}
-		boundary, err := lock.Publish(ctx, storeName, storeTemp, data, r.policy, mode, securefs.NoFaults{})
-		if err != nil {
+		in.State = StoreCoherent
+	}
+	if in.State == StoreConflict {
+		return ErrRollbackConflict
+	}
+	if in.State != StoreVirgin && in.State != StoreCoherent {
+		return ErrNotReconciled
+	}
+	if in.State == StoreVirgin {
+		// A permanent lock starts with an explicit generation-zero absence
+		// checkpoint. This makes a crash between lock creation and first store
+		// publication distinguishable from an unsafe missing target.
+		if err := writeVirginCheckpoint(lock, r.instance); err != nil {
 			return err
 		}
-		if !boundary.NamespacePublished || !boundary.TargetDurable {
-			return ErrUnavailable
-		}
-		return writeCheckpoint(lock, r.instance, successor, r.policy)
-	}))
+	}
+	current := uint64(0)
+	if in.State == StoreCoherent {
+		current = in.Snapshot.Generation()
+	}
+	if current >= (1<<53)-1 {
+		return ErrGenerationExhausted
+	}
+	if successor.Generation() != current+1 {
+		return ErrRollbackConflict
+	}
+	mode := securefs.AbsentTarget
+	if in.State == StoreCoherent {
+		mode = securefs.PresentTarget
+	}
+	boundary, err := lock.Publish(ctx, storeName, storeTemp, data, r.policy, mode, securefs.NoFaults{})
+	if err != nil {
+		return err
+	}
+	if !boundary.NamespacePublished || !boundary.TargetDurable {
+		return ErrUnavailable
+	}
+	return writeCheckpoint(lock, r.instance, successor, r.policy)
 }
 
 type storeReader interface {
@@ -236,7 +240,9 @@ func inspectFiles(root storeReader, instance [16]byte, policy securefs.FilePolic
 		return Inspection{State: StoreConflict}, nil
 	}
 	if !lockPresent || len(lockData) != checkpointJournalBytes {
-		return Inspection{State: StoreInterruptedBootstrap, Snapshot: snapshot}, nil
+		// A target without a complete authenticated history could be rollback
+		// material. Never promote it to a new high-water checkpoint.
+		return Inspection{State: StoreConflict, Snapshot: snapshot}, nil
 	}
 	var journal [checkpointJournalBytes]byte
 	copy(journal[:], lockData)
