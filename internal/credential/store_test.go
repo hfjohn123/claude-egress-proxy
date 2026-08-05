@@ -2,6 +2,7 @@ package credential
 
 import (
 	"context"
+	"crypto/sha256"
 	"testing"
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
@@ -39,6 +40,24 @@ func TestValidateOnlyRejectsPresentStoreWithoutCompleteJournal(t *testing.T) {
 		if string(r.files[storeName]) != string(beforeStore) || string(r.files[lockName]) != string(beforeJournal) {
 			t.Fatal("validate-only mutated store members")
 		}
+	}
+}
+
+func TestValidateOnlyRejectsMissingStoreAfterNonzeroCheckpoint(t *testing.T) {
+	var instance [16]byte
+	digest := sha256.Sum256([]byte("predecessor"))
+	slot, err := encodeCheckpoint(0, instance, 1, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := make([]byte, checkpointJournalBytes)
+	copy(journal, slot[:])
+	state, err := inspectFiles(fakeStoreReader{files: map[string][]byte{lockName: journal}}, instance, securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.State != StoreConflict {
+		t.Fatalf("state = %v, want conflict", state.State)
 	}
 }
 

@@ -232,6 +232,11 @@ func inspectFiles(root storeReader, instance [16]byte, policy securefs.FilePolic
 			if cp, ok := selectCheckpoint(journal, instance); ok && cp.generation == 0 && cp.digest == ([sha256.Size]byte{}) {
 				return Inspection{State: StoreVirgin}, nil
 			}
+			// Once a nonzero checkpoint is durable, absence of its target is a
+			// rollback or destruction signal, never an interrupted bootstrap.
+			if _, ok := selectCheckpoint(journal, instance); ok {
+				return Inspection{State: StoreConflict}, nil
+			}
 		}
 		return Inspection{State: StoreInterruptedBootstrap}, nil
 	}
