@@ -83,7 +83,35 @@ func validateMaterial(c tls.Certificate, hostname string, now time.Time) (*mater
 	if !exactDNSName(leaf, hostname) || now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
 		return nil, errNoCertificate
 	}
-	return &material{certificate: c, notBefore: leaf.NotBefore, notAfter: leaf.NotAfter}, nil
+	cloned, err := cloneCertificate(c)
+	if err != nil {
+		return nil, errNoCertificate
+	}
+	return &material{certificate: cloned, notBefore: leaf.NotBefore, notAfter: leaf.NotAfter}, nil
+}
+
+func cloneCertificate(c tls.Certificate) (tls.Certificate, error) {
+	der := make([][]byte, len(c.Certificate))
+	for i, bytes := range c.Certificate {
+		der[i] = append([]byte(nil), bytes...)
+	}
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(c.PrivateKey)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	key, err := x509.ParsePKCS8PrivateKey(append([]byte(nil), keyBytes...))
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.Certificate{Certificate: der, PrivateKey: key, OCSPStaple: append([]byte(nil), c.OCSPStaple...), SignedCertificateTimestamps: cloneBytes(c.SignedCertificateTimestamps)}, nil
+}
+
+func cloneBytes(in [][]byte) [][]byte {
+	out := make([][]byte, len(in))
+	for i, b := range in {
+		out[i] = append([]byte(nil), b...)
+	}
+	return out
 }
 
 func exactDNSName(c *x509.Certificate, hostname string) bool {

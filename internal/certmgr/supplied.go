@@ -4,13 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"io/fs"
-	"os"
-	"runtime"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
+	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
 	"github.com/hfjohn123/claude-egress-proxy/internal/timebase"
 )
 
@@ -22,6 +21,8 @@ type SuppliedConfig struct {
 	Hostname, CertificateFile, PrivateKeyFile string
 	Now                                       func() time.Time
 	Clock                                     timebase.Clock
+	RootPolicy                                securefs.RootPolicy
+	FilePolicy                                securefs.FilePolicy
 }
 
 // Supplied validates and polls a supplied PEM pair without replacing good state on failure.
@@ -29,6 +30,8 @@ type Supplied struct {
 	*Manager
 	certificateFile, privateKeyFile string
 	clock                           timebase.Clock
+	rootPolicy                      securefs.RootPolicy
+	filePolicy                      securefs.FilePolicy
 	mu                              sync.Mutex
 	failed                          bool
 }
@@ -41,7 +44,24 @@ func NewSupplied(config SuppliedConfig) (*Supplied, error) {
 	if clock == nil {
 		clock = timebase.Real{}
 	}
-	m := &Supplied{Manager: New(config.Hostname, config.Now), certificateFile: config.CertificateFile, privateKeyFile: config.PrivateKeyFile, clock: clock}
+	rootPolicy := config.RootPolicy
+	if securefs.PermissionsEqual(rootPolicy.Access, securefs.PermissionPolicy{}) {
+		rootPolicy.Access = securefs.IdentityOnlyPermissions()
+	}
+	filePolicy := config.FilePolicy
+	if securefs.PermissionsEqual(filePolicy.Access, securefs.PermissionPolicy{}) {
+		filePolicy.Access = securefs.IdentityOnlyPermissions()
+	}
+	if filePolicy.Presence != securefs.Required {
+		filePolicy.Presence = securefs.Required
+	}
+	if filePolicy.Kind != securefs.RegularFile {
+		filePolicy.Kind = securefs.RegularFile
+	}
+	if filePolicy.MaxBytes == 0 {
+		filePolicy.MaxBytes = maxSuppliedFileBytes
+	}
+	m := &Supplied{Manager: New(config.Hostname, config.Now), certificateFile: config.CertificateFile, privateKeyFile: config.PrivateKeyFile, clock: clock, rootPolicy: rootPolicy, filePolicy: filePolicy}
 	if err := m.load(); err != nil {
 		return nil, err
 	}
@@ -49,11 +69,7 @@ func NewSupplied(config SuppliedConfig) (*Supplied, error) {
 }
 
 func (m *Supplied) load() error {
-	certPEM, err := readSuppliedFile(m.certificateFile)
-	if err != nil {
-		return errNoCertificate
-	}
-	keyPEM, err := readSuppliedFile(m.privateKeyFile)
+	certPEM, keyPEM, err := readSuppliedPair(m.certificateFile, m.privateKeyFile, m.rootPolicy, m.filePolicy)
 	if err != nil {
 		return errNoCertificate
 	}
@@ -64,15 +80,24 @@ func (m *Supplied) load() error {
 	return m.InstallServing(certificate)
 }
 
-func readSuppliedFile(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
+func readSuppliedPair(certPath, keyPath string, rootPolicy securefs.RootPolicy, filePolicy securefs.FilePolicy) ([]byte, []byte, error) {
+	if filepath.Dir(certPath) != filepath.Dir(keyPath) {
+		return nil, nil, errors.New("certificate pair split")
+	}
+	root, err := securefs.OpenRoot(filepath.Dir(certPath), rootPolicy)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&fs.ModeSymlink != 0 || info.Size() > maxSuppliedFileBytes || (runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0) {
-		return nil, errors.New("unsafe certificate file")
+	defer root.Close()
+	certPEM, _, err := root.ReadFile(filepath.Base(certPath), filePolicy)
+	if err != nil {
+		return nil, nil, err
 	}
-	return os.ReadFile(path)
+	keyPEM, _, err := root.ReadFile(filepath.Base(keyPath), filePolicy)
+	if err != nil {
+		return nil, nil, err
+	}
+	return certPEM, keyPEM, nil
 }
 
 func (m *Supplied) Start(ctx context.Context) error {
