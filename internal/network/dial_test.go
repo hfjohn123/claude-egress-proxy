@@ -2,8 +2,10 @@ package network
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"testing"
+	"time"
 )
 
 func TestClassifyCandidatesRejectsUnsafeSet(t *testing.T) {
@@ -13,6 +15,13 @@ func TestClassifyCandidatesRejectsUnsafeSet(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("unsafe answer set accepted")
+	}
+}
+
+func TestClassifyCandidatesRejectsIPv4MappedIPv6(t *testing.T) {
+	_, err := ClassifyCandidates([]netip.Addr{netip.MustParseAddr("::ffff:8.8.8.8")})
+	if err == nil {
+		t.Fatal("IPv4-mapped IPv6 accepted")
 	}
 }
 
@@ -46,5 +55,17 @@ func TestDialCandidatesRejectsSelfAddress(t *testing.T) {
 		PublicSelfSnapshot{Addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8")}})
 	if err == nil {
 		t.Fatal("self address accepted")
+	}
+}
+
+func TestDialCandidatesRequiresFreshPositiveSelfSnapshot(t *testing.T) {
+	d := Dialer{}
+	for _, snapshot := range []PublicSelfSnapshot{
+		{ObservedAt: time.Now().Add(-6 * time.Second), Outcome: publicSelfOutcome("positive"), Addresses: []netip.Addr{netip.MustParseAddr("9.9.9.9")}},
+		{ObservedAt: time.Now(), Outcome: publicSelfOutcome("failure")},
+	} {
+		if _, _, err := d.DialCandidates(context.Background(), "example.com", 443, []netip.Addr{netip.MustParseAddr("8.8.8.8")}, snapshot); !errors.Is(err, ErrPublicSelfStale) {
+			t.Fatalf("error = %v, want %v", err, ErrPublicSelfStale)
+		}
 	}
 }
