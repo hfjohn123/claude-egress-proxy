@@ -287,12 +287,31 @@ func (c *Coordinator) SetReadiness(p contract.ReadinessPredicate, ready bool) bo
 	c.signalLocked()
 	return true
 }
+func (c *Coordinator) ReadinessReady() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, value := range contract.AllReadinessPredicates() {
+		p, ok := contract.ParseReadinessPredicate(value)
+		if !ok || !c.readiness[p] {
+			return false
+		}
+	}
+	return true
+}
 func (c *Coordinator) Snapshot() telemetry.StateSnapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := telemetry.StateSnapshot{PendingSetupReservations: uint64(len(c.pending)), ActiveTunnels: uint64(len(c.tunnels))}
 	if !c.unavailable && c.snapshot != nil {
 		s.CredentialGeneration = c.snapshot.Generation()
+	}
+	s.Ready = true
+	for _, value := range contract.AllReadinessPredicates() {
+		p, ok := contract.ParseReadinessPredicate(value)
+		if !ok || !c.readiness[p] {
+			s.Ready = false
+			break
+		}
 	}
 	return s
 }

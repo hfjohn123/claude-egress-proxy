@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/admintoken"
@@ -10,6 +11,19 @@ import (
 	"github.com/hfjohn123/claude-egress-proxy/internal/wire"
 	"github.com/prometheus/common/expfmt"
 )
+
+var errMetricsTooLarge = errors.New("proxy: metrics response too large")
+
+const maxMetricsResponse = 1 << 20
+
+type boundedBuffer struct{ bytes.Buffer }
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > maxMetricsResponse {
+		return 0, errMetricsTooLarge
+	}
+	return b.Buffer.Write(p)
+}
 
 // AdminConfig keeps the administrative surface explicitly independent from the
 // public proxy configuration.
@@ -72,7 +86,7 @@ func NewAdminHandler(cfg AdminConfig) http.Handler {
 			writeAdmin(w, r.Method, http.StatusInternalServerError, "internal_error\n", "text/plain; charset=utf-8")
 			return
 		}
-		var body bytes.Buffer
+		var body boundedBuffer
 		for _, family := range families {
 			if _, err := expfmt.MetricFamilyToText(&body, family); err != nil {
 				writeAdmin(w, r.Method, http.StatusInternalServerError, "internal_error\n", "text/plain; charset=utf-8")

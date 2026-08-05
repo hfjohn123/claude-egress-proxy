@@ -1,10 +1,23 @@
 package proxy
 
 import (
+	"errors"
 	"net"
+	"net/netip"
+	"time"
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/admission"
+	"github.com/hfjohn123/claude-egress-proxy/internal/timebase"
 )
+
+var ErrNonLoopbackAdmin = errors.New("proxy: admin listener must be loopback")
+
+func CanonicalAdminAddress(address netip.AddrPort) bool {
+	if address.Port() == 0 || !address.Addr().IsValid() {
+		return false
+	}
+	return address.Addr() == netip.MustParseAddr("127.0.0.1") || address.Addr() == netip.MustParseAddr("::1")
+}
 
 type adminListener struct {
 	net.Listener
@@ -16,6 +29,12 @@ func NewAdminListener(listener net.Listener, admissionControl *admission.Admin) 
 	return &adminListener{Listener: listener, admission: admissionControl}
 }
 func (l *adminListener) Accept() (net.Conn, error) {
+	if l.Listener == nil {
+		return nil, net.ErrClosed
+	}
+	if address, ok := l.Listener.Addr().(*net.TCPAddr); ok && (address.IP == nil || !address.IP.IsLoopback()) {
+		return nil, ErrNonLoopbackAdmin
+	}
 	for {
 		conn, err := l.Listener.Accept()
 		if err != nil {
@@ -30,6 +49,9 @@ func (l *adminListener) Accept() (net.Conn, error) {
 			_ = conn.Close()
 			continue
 		}
-		return newOwnedConn(conn, lease), nil
+		owned := newOwnedConn(conn, lease)
+		_ = owned.SetReadDeadline(timebase.Real{}.Now().Add(10 * time.Second))
+		_ = owned.SetWriteDeadline(timebase.Real{}.Now().Add(10 * time.Second))
+		return owned, nil
 	}
 }

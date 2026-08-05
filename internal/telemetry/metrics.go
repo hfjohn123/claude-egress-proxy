@@ -14,7 +14,10 @@ var ErrInvalidMetrics = errors.New("telemetry: invalid metrics")
 
 const invalidClosed = "telemetry: invalid closed value"
 
-type StateSnapshot struct{ TLSHandshakeLimiterEntries, AuthenticationLimiterEntries, PACLimiterEntries, PreAuthConnections, PendingSetupReservations, ActiveTunnels, CredentialGeneration uint64 }
+type StateSnapshot struct {
+	TLSHandshakeLimiterEntries, AuthenticationLimiterEntries, PACLimiterEntries, PreAuthConnections, PendingSetupReservations, ActiveTunnels, CredentialGeneration uint64
+	Ready                                                                                                                                                          bool
+}
 type Metrics struct {
 	registry                                                          *prometheus.Registry
 	clock                                                             timebase.Clock
