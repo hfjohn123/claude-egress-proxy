@@ -63,12 +63,22 @@ func authResult(value string) contract.AuthenticationResult {
 	}
 	return r
 }
+func closeResult(value string) contract.CloseResult {
+	r, ok := contract.ParseCloseResult(value)
+	if !ok {
+		panic("session: contract")
+	}
+	return r
+}
 
 func (c *Coordinator) signalLocked() { close(c.changed); c.changed = make(chan struct{}) }
 func (c *Coordinator) InstallCredentials(next credential.ValidatedSnapshot) InstallResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if next.Generation() < c.highWater {
+		return InstallRejected
+	}
+	if c.snapshot != nil && next.Instance() != c.snapshot.Instance() {
 		return InstallRejected
 	}
 	if c.snapshot != nil && next.Generation() == c.snapshot.Generation() && !reflect.DeepEqual(next, *c.snapshot) {
@@ -82,10 +92,33 @@ func (c *Coordinator) InstallCredentials(next credential.ValidatedSnapshot) Inst
 			c.revoked[record.ID] = struct{}{}
 		}
 	}
+	newlyRevoked := make(map[credential.RecordID]struct{})
+	if c.snapshot != nil {
+		for _, record := range next.Records() {
+			if record.State != credential.Revoked {
+				continue
+			}
+			if prior, ok := c.snapshot.AuthHandle(record.ID); ok && prior.RecordID == record.ID {
+				newlyRevoked[record.ID] = struct{}{}
+			}
+		}
+	}
 	recovered := c.unavailable && c.snapshot != nil
 	c.snapshot = &next
 	c.highWater = next.Generation()
 	c.unavailable = false
+	for r := range c.pending {
+		if _, ok := newlyRevoked[r.handle.RecordID]; ok {
+			r.releaseLocked(connect("credential_changed"))
+		}
+	}
+	for t := range c.tunnels {
+		if t.handoff != nil && t.handoff.attempt != nil {
+			if _, ok := newlyRevoked[t.handoff.attempt.handle.RecordID]; ok {
+				t.releaseLocked(closeResult("credential_revoked"), contract.ByteTotals{})
+			}
+		}
+	}
 	c.signalLocked()
 	if recovered {
 		return InstallRecovered
@@ -128,9 +161,6 @@ func (c *Coordinator) Authenticate(header []byte, lease admission.PublicLease, s
 func (c *Coordinator) BeginFixed(lease Lease) (Handoff, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.draining {
-		return nil, false
-	}
 	h := newHandoff(c, lease, nil)
 	c.handoffs[h] = struct{}{}
 	c.signalLocked()
@@ -168,7 +198,7 @@ func (c *Coordinator) Transfer(h Handoff) (Reservation, contract.ConnectResult) 
 		x.releaseLocked()
 		return nil, connect("draining")
 	}
-	if x.attempt == nil || !x.attached || x.released {
+	if x.attempt == nil || !x.attached || x.released || x.transferred {
 		return nil, connect("client_disconnected")
 	}
 	r := &reservation{coordinator: c, handoff: x, handle: x.attempt.handle}
