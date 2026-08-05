@@ -24,7 +24,7 @@ func (a *Authentication) AdmitInvalid(prefix Prefix) Decision {
 	prefix = canonicalPrefix(prefix)
 	now := a.clock.Now()
 	e, state := a.prefixes.entry(prefix, now, func() bucket {
-		return newBucket(a.clock, a.limits.InvalidAuthRatePerMinute/60, a.limits.InvalidAuthBurst)
+		return newBucket(a.clock, float64(a.limits.InvalidAuthRatePerMinute)/60, a.limits.InvalidAuthBurst)
 	})
 	if state == entryFull {
 		return DecisionMapFull

@@ -35,7 +35,7 @@ type Public struct {
 
 func NewPublic(clock timebase.Clock) *Public {
 	l := contract.V1()
-	return &Public{clock: clock, global: newBucket(clock, l.PreAuthRatePerSecond, l.PreAuthBurst), mapped: newPrefixMap(l.PrefixEntries, l.LimiterEntryTTL), overflow: newBucket(clock, l.OverflowRatePerSecond, l.OverflowBurst), limits: l}
+	return &Public{clock: clock, global: newBucket(clock, float64(l.PreAuthRatePerSecond), l.PreAuthBurst), mapped: newPrefixMap(l.PrefixEntries, l.LimiterEntryTTL), overflow: newBucket(clock, float64(l.OverflowRatePerSecond), l.OverflowBurst), limits: l}
 }
 
 type PublicLease struct {
@@ -44,8 +44,10 @@ type PublicLease struct {
 	entry      *prefixEntry
 	generation uint64
 	overflow   bool
-	once       sync.Once
+	state      *leaseState
 }
+
+type leaseState struct{ once sync.Once }
 
 func (p *Public) Acquire(prefix Prefix) (PublicLease, Decision) {
 	p.mu.Lock()
@@ -56,7 +58,7 @@ func (p *Public) Acquire(prefix Prefix) (PublicLease, Decision) {
 		return PublicLease{}, DecisionThrottled
 	}
 	entry, state := p.mapped.entry(prefix, now, func() bucket {
-		return newBucket(p.clock, p.limits.MappedPrefixRatePerSecond, p.limits.MappedPrefixBurst)
+		return newBucket(p.clock, float64(p.limits.MappedPrefixRatePerSecond), p.limits.MappedPrefixBurst)
 	})
 	if state == entryExpired {
 		return PublicLease{}, DecisionThrottled
@@ -72,7 +74,7 @@ func (p *Public) Acquire(prefix Prefix) (PublicLease, Decision) {
 		p.global, p.overflow = global, overflow
 		p.active++
 		p.overflowActive++
-		return PublicLease{owner: p, prefix: prefix, overflow: true}, DecisionSaturationOverflow
+		return PublicLease{owner: p, prefix: prefix, overflow: true, state: &leaseState{}}, DecisionSaturationOverflow
 	}
 	if entry.active == p.limits.MappedPrefixActive {
 		return PublicLease{}, DecisionThrottled
@@ -87,14 +89,14 @@ func (p *Public) Acquire(prefix Prefix) (PublicLease, Decision) {
 	entry.bucket, p.global = entryBucket, global
 	p.active++
 	entry.active++
-	return PublicLease{owner: p, prefix: prefix, entry: entry, generation: entry.generation}, DecisionAllowed
+	return PublicLease{owner: p, prefix: prefix, entry: entry, generation: entry.generation, state: &leaseState{}}, DecisionAllowed
 }
 
 func (l *PublicLease) Release() {
-	if l == nil || l.owner == nil {
+	if l == nil || l.owner == nil || l.state == nil {
 		return
 	}
-	l.once.Do(func() {
+	l.state.once.Do(func() {
 		p := l.owner
 		p.mu.Lock()
 		defer p.mu.Unlock()

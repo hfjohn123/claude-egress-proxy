@@ -61,6 +61,25 @@ func TestPublicLeaseReleaseIsExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestPublicCopiedLeaseReleasesExactlyOnce(t *testing.T) {
+	p := NewPublic(newTestClock(time.Unix(0, 0)))
+	lease, d := p.Acquire(netip.MustParsePrefix("198.51.100.10/32"))
+	if !d.Allowed() {
+		t.Fatal(d)
+	}
+	other, d := p.Acquire(netip.MustParsePrefix("198.51.100.11/32"))
+	if !d.Allowed() {
+		t.Fatal(d)
+	}
+	copy := lease
+	lease.Release()
+	copy.Release()
+	if got := p.Active(); got != 1 {
+		t.Fatalf("active = %d, want 1", got)
+	}
+	other.Release()
+}
+
 type testClock struct{ now time.Time }
 
 func newTestClock(now time.Time) *testClock                { return &testClock{now: now} }

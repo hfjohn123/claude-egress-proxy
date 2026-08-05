@@ -23,4 +23,19 @@ func TestAuthenticationIPv6AggregatesAt64(t *testing.T) {
 	}
 }
 
+func TestAuthenticationRefillsFiveTokensPerMinute(t *testing.T) {
+	clock := newTestClock(time.Unix(0, 0))
+	a := NewAuthentication(clock)
+	prefix := netip.MustParsePrefix("198.51.100.31/32")
+	for range 10 {
+		if d := a.AdmitInvalid(prefix); !d.Allowed() {
+			t.Fatal(d)
+		}
+	}
+	clock.Advance(12 * time.Second)
+	if d := a.AdmitInvalid(prefix); !d.Allowed() {
+		t.Fatalf("12-second refill = %v", d)
+	}
+}
+
 var _ = time.Second

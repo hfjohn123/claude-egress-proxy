@@ -46,4 +46,23 @@ func TestAdminMetricsWorkHasTwoSlots(t *testing.T) {
 	}
 }
 
+func TestAdminCopiedLeaseReleasesExactlyOnce(t *testing.T) {
+	a := NewAdmin(newTestClock(time.Unix(0, 0)))
+	lease, d := a.Acquire()
+	if !d.Allowed() {
+		t.Fatal(d)
+	}
+	other, d := a.Acquire()
+	if !d.Allowed() {
+		t.Fatal(d)
+	}
+	copy := lease
+	lease.Release()
+	copy.Release()
+	if got := a.active; got != 1 {
+		t.Fatalf("active = %d, want 1", got)
+	}
+	other.Release()
+}
+
 var _ = time.Second

@@ -14,8 +14,8 @@ type bucket struct {
 	at     time.Time
 }
 
-func newBucket(clock timebase.Clock, rate, burst int) bucket {
-	return bucket{tokens: float64(burst), burst: float64(burst), rate: float64(rate), at: clock.Now()}
+func newBucket(clock timebase.Clock, rate float64, burst int) bucket {
+	return bucket{tokens: float64(burst), burst: float64(burst), rate: rate, at: clock.Now()}
 }
 
 func (b *bucket) take(now time.Time) bool {

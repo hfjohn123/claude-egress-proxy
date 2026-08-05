@@ -30,12 +30,12 @@ type PAC struct {
 
 func NewPAC(clock timebase.Clock) *PAC {
 	l := contract.V1()
-	return &PAC{clock: clock, prefixes: newPrefixMap(l.PACEntries, l.PACEntryTTL), global: newBucket(clock, l.PACGlobalRatePerMinute/60, l.PACGlobalBurst), limits: l}
+	return &PAC{clock: clock, prefixes: newPrefixMap(l.PACEntries, l.PACEntryTTL), global: newBucket(clock, float64(l.PACGlobalRatePerMinute)/60, l.PACGlobalBurst), limits: l}
 }
 
 type WorkLease struct {
 	owner *PAC
-	once  sync.Once
+	state *leaseState
 }
 
 func (p *PAC) Acquire(prefix Prefix) (WorkLease, PACDecision) {
@@ -46,7 +46,9 @@ func (p *PAC) Acquire(prefix Prefix) (WorkLease, PACDecision) {
 	if p.active == p.limits.PACWorkSlots {
 		return WorkLease{}, PACCapacity
 	}
-	e, state := p.prefixes.entry(prefix, now, func() bucket { return newBucket(p.clock, p.limits.PACPrefixRatePerMinute/60, p.limits.PACPrefixBurst) })
+	e, state := p.prefixes.entry(prefix, now, func() bucket {
+		return newBucket(p.clock, float64(p.limits.PACPrefixRatePerMinute)/60, p.limits.PACPrefixBurst)
+	})
 	if state == entryFull {
 		return WorkLease{}, PACMapFull
 	}
@@ -68,13 +70,13 @@ func (p *PAC) Acquire(prefix Prefix) (WorkLease, PACDecision) {
 	}
 	e.bucket, p.global = prefixBucket, global
 	p.active++
-	return WorkLease{owner: p}, PACAllowed
+	return WorkLease{owner: p, state: &leaseState{}}, PACAllowed
 }
 func (l *WorkLease) Release() {
-	if l == nil || l.owner == nil {
+	if l == nil || l.owner == nil || l.state == nil {
 		return
 	}
-	l.once.Do(func() {
+	l.state.once.Do(func() {
 		l.owner.mu.Lock()
 		defer l.owner.mu.Unlock()
 		if l.owner.active > 0 {
