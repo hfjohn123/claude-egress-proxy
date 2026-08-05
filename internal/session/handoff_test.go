@@ -86,3 +86,37 @@ func TestBeginFixedAllowsAlreadyAdmittedResponseDuringDrain(t *testing.T) {
 		t.Fatal("drain rejected admitted terminal response")
 	}
 }
+
+func TestInstallRevocationClosesMatchingPendingAndTunnel(t *testing.T) {
+	var instance [16]byte
+	var id credential.RecordID
+	id[0] = 9
+	record := credential.Record{ID: id, Device: "laptop", CreatedAt: time.Unix(0, 0).UTC(), State: credential.Active}
+	active, err := credential.NewValidatedSnapshot(instance, 1, []credential.Record{record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewCoordinator(credential.Verifier{}, nil)
+	c.InstallCredentials(active)
+	pendingHandoff := newHandoff(c, &countLease{}, &attempt{handle: credential.AuthHandle{RecordID: id}})
+	pendingHandoff.attached = true
+	c.handoffs[pendingHandoff] = struct{}{}
+	pending := &reservation{coordinator: c, handoff: pendingHandoff, handle: credential.AuthHandle{RecordID: id}}
+	c.pending[pending] = struct{}{}
+	tunnelHandoff := newHandoff(c, &countLease{}, &attempt{handle: credential.AuthHandle{RecordID: id}})
+	tunnelHandoff.attached = true
+	c.handoffs[tunnelHandoff] = struct{}{}
+	client, peer := net.Pipe()
+	defer peer.Close()
+	tun := &tunnel{coordinator: c, handoff: tunnelHandoff, origin: client}
+	c.tunnels[tun] = struct{}{}
+	record.State = credential.Revoked
+	revoked, err := credential.NewValidatedSnapshot(instance, 2, []credential.Record{record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.InstallCredentials(revoked)
+	if len(c.pending) != 0 || len(c.tunnels) != 0 || len(c.handoffs) != 0 {
+		t.Fatalf("owners remain: pending=%d tunnels=%d handoffs=%d", len(c.pending), len(c.tunnels), len(c.handoffs))
+	}
+}
