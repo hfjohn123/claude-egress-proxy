@@ -11,6 +11,7 @@ import (
 	"github.com/hfjohn123/claude-egress-proxy/internal/network"
 	"github.com/hfjohn123/claude-egress-proxy/internal/policy"
 	"github.com/hfjohn123/claude-egress-proxy/internal/session"
+	"github.com/hfjohn123/claude-egress-proxy/internal/timebase"
 	"github.com/hfjohn123/claude-egress-proxy/internal/wire"
 )
 
@@ -21,6 +22,7 @@ type PublicConfig struct {
 	Resolver    network.Resolver
 	Dialer      network.Dialer
 	PublicSelf  network.PublicSelfSnapshot
+	Clock       timebase.Clock
 }
 
 // NewPublicHandler handles only authenticated CONNECT tunnels. It never parses
@@ -63,7 +65,7 @@ func servePublic(cfg PublicConfig, w http.ResponseWriter, r *http.Request) {
 		writePublic(w, r.Method, wire.FrameInternalError)
 		return
 	}
-	attempt, _, result := cfg.Coordinator.Authenticate(header, leased.PublicLease(), time.Now())
+	attempt, _, result := cfg.Coordinator.Authenticate(header, leased.PublicLease(), publicNow(cfg))
 	if result.String() != "established" {
 		writePublic(w, r.Method, frameFor(result.String()))
 		return
@@ -182,4 +184,11 @@ func frameFor(s string) wire.Frame {
 	default:
 		return wire.FrameInternalError
 	}
+}
+
+func publicNow(cfg PublicConfig) time.Time {
+	if cfg.Clock != nil {
+		return cfg.Clock.Now()
+	}
+	return timebase.Real{}.Now()
 }
