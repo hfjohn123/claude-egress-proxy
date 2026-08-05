@@ -4,6 +4,7 @@ package session
 import (
 	"context"
 	"net"
+	"reflect"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ type Coordinator struct {
 	auth        *admission.Authentication
 	snapshot    *credential.ValidatedSnapshot
 	highWater   uint64
+	revoked     map[credential.RecordID]struct{}
 	unavailable bool
 	draining    bool
 	readiness   map[contract.ReadinessPredicate]bool
@@ -45,7 +47,7 @@ type Coordinator struct {
 }
 
 func NewCoordinator(verifier credential.Verifier, auth *admission.Authentication) *Coordinator {
-	return &Coordinator{verifier: verifier, auth: auth, unavailable: true, readiness: make(map[contract.ReadinessPredicate]bool), handoffs: make(map[*handoff]struct{}), pending: make(map[*reservation]struct{}), tunnels: make(map[*tunnel]struct{}), changed: make(chan struct{})}
+	return &Coordinator{verifier: verifier, auth: auth, unavailable: true, revoked: make(map[credential.RecordID]struct{}), readiness: make(map[contract.ReadinessPredicate]bool), handoffs: make(map[*handoff]struct{}), pending: make(map[*reservation]struct{}), tunnels: make(map[*tunnel]struct{}), changed: make(chan struct{})}
 }
 func connect(value string) contract.ConnectResult {
 	r, ok := contract.ParseConnectResult(value)
@@ -69,8 +71,16 @@ func (c *Coordinator) InstallCredentials(next credential.ValidatedSnapshot) Inst
 	if next.Generation() < c.highWater {
 		return InstallRejected
 	}
-	if c.snapshot != nil && next.Generation() == c.snapshot.Generation() && next.Records() == nil {
+	if c.snapshot != nil && next.Generation() == c.snapshot.Generation() && !reflect.DeepEqual(next, *c.snapshot) {
 		return InstallRejected
+	}
+	for _, record := range next.Records() {
+		if _, wasRevoked := c.revoked[record.ID]; wasRevoked && record.State == credential.Active {
+			return InstallRejected
+		}
+		if record.State == credential.Revoked {
+			c.revoked[record.ID] = struct{}{}
+		}
 	}
 	recovered := c.unavailable && c.snapshot != nil
 	c.snapshot = &next
@@ -85,7 +95,7 @@ func (c *Coordinator) InstallCredentials(next credential.ValidatedSnapshot) Inst
 func (c *Coordinator) SetCredentialUnavailable(generation uint64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if generation < c.highWater || c.unavailable {
+	if generation != c.highWater || c.unavailable {
 		return false
 	}
 	c.unavailable = true
