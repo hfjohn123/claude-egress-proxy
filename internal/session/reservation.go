@@ -15,6 +15,7 @@ type reservation struct {
 	handoff     *handoff
 	handle      credential.AuthHandle
 	released    bool
+	result      contract.ConnectResult
 }
 
 func (r *reservation) Release(v contract.ConnectResult) bool {
@@ -25,11 +26,12 @@ func (r *reservation) Release(v contract.ConnectResult) bool {
 	defer r.coordinator.mu.Unlock()
 	return r.releaseLocked(v)
 }
-func (r *reservation) releaseLocked(contract.ConnectResult) bool {
+func (r *reservation) releaseLocked(result contract.ConnectResult) bool {
 	if r.released {
 		return false
 	}
 	r.released = true
+	r.result = result
 	delete(r.coordinator.pending, r)
 	r.handoff.releaseLocked()
 	r.coordinator.signalLocked()

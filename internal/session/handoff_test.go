@@ -120,3 +120,21 @@ func TestInstallRevocationClosesMatchingPendingAndTunnel(t *testing.T) {
 		t.Fatalf("owners remain: pending=%d tunnels=%d handoffs=%d", len(c.pending), len(c.tunnels), len(c.handoffs))
 	}
 }
+
+func TestForceCloseHijackedRemovesPendingAndCommitRejectsReleasedHandoff(t *testing.T) {
+	c := NewCoordinator(credential.Verifier{}, nil)
+	h := newHandoff(c, &countLease{}, &attempt{})
+	h.attached = true
+	c.handoffs[h] = struct{}{}
+	r := &reservation{coordinator: c, handoff: h}
+	c.pending[r] = struct{}{}
+	c.ForceCloseHijacked()
+	if len(c.pending) != 0 || len(c.handoffs) != 0 {
+		t.Fatal("force close retained owner")
+	}
+	client, peer := net.Pipe()
+	defer peer.Close()
+	if _, got := c.Commit(r, client); got.String() != "credential_changed" {
+		t.Fatalf("commit result = %s", got)
+	}
+}

@@ -15,6 +15,8 @@ type tunnel struct {
 	handoff     *handoff
 	origin      net.Conn
 	released    bool
+	result      contract.CloseResult
+	bytes       contract.ByteTotals
 }
 
 func (t *tunnel) Release(v contract.CloseResult, b contract.ByteTotals) bool {
@@ -25,11 +27,12 @@ func (t *tunnel) Release(v contract.CloseResult, b contract.ByteTotals) bool {
 	defer t.coordinator.mu.Unlock()
 	return t.releaseLocked(v, b)
 }
-func (t *tunnel) releaseLocked(contract.CloseResult, contract.ByteTotals) bool {
+func (t *tunnel) releaseLocked(result contract.CloseResult, bytes contract.ByteTotals) bool {
 	if t.released {
 		return false
 	}
 	t.released = true
+	t.result, t.bytes = result, bytes
 	delete(t.coordinator.tunnels, t)
 	if t.origin != nil {
 		_ = t.origin.Close()

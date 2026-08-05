@@ -201,6 +201,23 @@ func (c *Coordinator) Transfer(h Handoff) (Reservation, contract.ConnectResult) 
 	if x.attempt == nil || !x.attached || x.released || x.transferred {
 		return nil, connect("client_disconnected")
 	}
+	if len(c.pending)+len(c.tunnels) >= contract.V1().GlobalCapacity {
+		return nil, connect("global_capacity")
+	}
+	owned := 0
+	for r := range c.pending {
+		if r.handle.Device == x.attempt.handle.Device {
+			owned++
+		}
+	}
+	for t := range c.tunnels {
+		if t.handoff != nil && t.handoff.attempt != nil && t.handoff.attempt.handle.Device == x.attempt.handle.Device {
+			owned++
+		}
+	}
+	if owned >= contract.V1().PerDeviceCapacityMax {
+		return nil, connect("device_capacity")
+	}
 	r := &reservation{coordinator: c, handoff: x, handle: x.attempt.handle}
 	c.pending[r] = struct{}{}
 	x.transferred = true
@@ -219,7 +236,7 @@ func (c *Coordinator) Commit(v Reservation, origin net.Conn) (Tunnel, contract.C
 		r.releaseLocked(connect("draining"))
 		return nil, connect("draining")
 	}
-	if r.released || c.unavailable || c.snapshot == nil || r.handle.Generation != c.snapshot.Generation() {
+	if r.released || r.handoff == nil || r.handoff.released || c.unavailable || c.snapshot == nil || r.handle.Generation != c.snapshot.Generation() {
 		r.releaseLocked(connect("credential_changed"))
 		return nil, connect("credential_changed")
 	}
@@ -265,7 +282,7 @@ func (c *Coordinator) BeginDrain() DrainResult {
 func (c *Coordinator) WaitHijacked(ctx context.Context) bool {
 	for {
 		c.mu.Lock()
-		empty := len(c.handoffs) == 0 && len(c.tunnels) == 0
+		empty := len(c.handoffs) == 0 && len(c.pending) == 0 && len(c.tunnels) == 0
 		ch := c.changed
 		c.mu.Unlock()
 		if empty {
@@ -281,6 +298,9 @@ func (c *Coordinator) WaitHijacked(ctx context.Context) bool {
 func (c *Coordinator) ForceCloseHijacked() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	for r := range c.pending {
+		r.releaseLocked(connect("draining"))
+	}
 	for h := range c.handoffs {
 		h.releaseLocked()
 	}
