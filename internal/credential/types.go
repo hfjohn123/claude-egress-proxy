@@ -63,8 +63,8 @@ type ValidatedSnapshot struct {
 	instance   [16]byte
 	generation uint64
 	records    []Record
-	byID       map[RecordID]int
-	byDevice   map[string]int
+	byID       [128]RecordID
+	byDevice   [128]string
 	dummy      Record
 }
 
@@ -72,28 +72,23 @@ func NewValidatedSnapshot(instance [16]byte, generation uint64, records []Record
 	if generation > (1<<53)-1 || len(records) > contract.V1().RecordLimit {
 		return ValidatedSnapshot{}, ErrInvalid
 	}
-	s := ValidatedSnapshot{instance: instance, generation: generation, records: append([]Record(nil), records...), byID: make(map[RecordID]int, len(records)), byDevice: make(map[string]int, len(records))}
+	s := ValidatedSnapshot{instance: instance, generation: generation, records: append([]Record(nil), records...)}
 	for i := range s.records {
 		r := &s.records[i]
 		if r.ID.IsZero() || !validDevice(r.Device) || !validTimestamp(r.CreatedAt) || (r.State != Active && r.State != Revoked) {
 			return ValidatedSnapshot{}, ErrInvalid
 		}
 		r.CreatedAt = r.CreatedAt.UTC()
-		if _, ok := s.byID[r.ID]; ok {
-			return ValidatedSnapshot{}, ErrInvalid
+		for j := 0; j < i; j++ {
+			if s.records[j].ID == r.ID || s.records[j].Device == r.Device {
+				return ValidatedSnapshot{}, ErrInvalid
+			}
 		}
-		if _, ok := s.byDevice[r.Device]; ok {
-			return ValidatedSnapshot{}, ErrInvalid
-		}
-		s.byID[r.ID] = i
-		s.byDevice[r.Device] = i
 	}
 	sort.Slice(s.records, func(i, j int) bool { return s.records[i].ID.String() < s.records[j].ID.String() })
-	s.byID = make(map[RecordID]int, len(s.records))
-	s.byDevice = make(map[string]int, len(s.records))
 	for i, r := range s.records {
-		s.byID[r.ID] = i
-		s.byDevice[r.Device] = i
+		s.byID[i] = r.ID
+		s.byDevice[i] = r.Device
 	}
 	return s, nil
 }
@@ -113,12 +108,28 @@ type AuthResult struct {
 
 // AuthHandle returns a stable, snapshot-scoped handle for an active record.
 func (s ValidatedSnapshot) AuthHandle(id RecordID) (AuthHandle, bool) {
-	i, ok := s.byID[id]
-	if !ok || s.records[i].State != Active {
+	i := -1
+	for n := range s.records {
+		if s.byID[n] == id {
+			i = n
+			break
+		}
+	}
+	if i < 0 || s.records[i].State != Active {
 		return AuthHandle{}, false
 	}
 	r := s.records[i]
 	return AuthHandle{RecordID: r.ID, Device: r.Device, Generation: s.generation}, true
+}
+
+func (s ValidatedSnapshot) recordForDevice(device string) (Record, bool) {
+	record, found := s.dummy, false
+	for i := range s.byDevice {
+		if i < len(s.records) && s.byDevice[i] == device {
+			record, found = s.records[i], true
+		}
+	}
+	return record, found
 }
 
 func validDevice(text string) bool {
