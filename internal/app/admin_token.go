@@ -78,7 +78,7 @@ func newAdminTokenHandler(deps adminTokenDependencies) Handler {
 		if err != nil {
 			return initFailure(contract.D006)
 		}
-		return Result{ExitCode: 0, Stdout: []byte("secret=" + base64.RawURLEncoding.EncodeToString(secret[:]) + "\nstate=rotated\n")}
+		return Result{ExitCode: 0, Stdout: []byte("secret=" + base64.RawURLEncoding.EncodeToString(secret[:]) + "\nstate=rotated\n"), OutputFailed: []byte("admin-token error: output_failed\n")}
 	}
 }
 

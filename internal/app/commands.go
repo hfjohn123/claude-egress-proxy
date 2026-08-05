@@ -229,7 +229,7 @@ func ProductionDependencies() Dependencies {
 	if err != nil {
 		return Dependencies{Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, PAC: NewPACHandler()}
 	}
-	return Dependencies{Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Checkout: checkout}), PAC: NewPACHandler()}
+	return Dependencies{Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Checkout: checkout}), AdminToken: NewAdminTokenHandler(), PAC: NewPACHandler()}
 }
 
 func NewPACHandler() Handler {
