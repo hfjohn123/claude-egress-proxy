@@ -35,8 +35,12 @@ func (a *attempt) Release(r contract.ConnectResult) bool {
 		return false
 	}
 	a.coordinator.mu.Lock()
-	defer a.coordinator.mu.Unlock()
-	return a.releaseLocked(r)
+	ok := a.releaseLocked(r)
+	a.coordinator.mu.Unlock()
+	if ok {
+		a.coordinator.notify(TerminalEvent{ConnectResult: r})
+	}
+	return ok
 }
 func (a *attempt) releaseLocked(contract.ConnectResult) bool {
 	if !a.live {

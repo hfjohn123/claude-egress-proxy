@@ -138,3 +138,27 @@ func TestForceCloseHijackedRemovesPendingAndCommitRejectsReleasedHandoff(t *test
 		t.Fatalf("commit result = %s", got)
 	}
 }
+
+func TestInstallRejectsPurgedAttemptAndObserverRunsOnce(t *testing.T) {
+	var instance [16]byte
+	var id credential.RecordID
+	id[0] = 4
+	record := credential.Record{ID: id, Device: "laptop", CreatedAt: time.Unix(0, 0).UTC(), State: credential.Active}
+	first, _ := credential.NewValidatedSnapshot(instance, 1, []credential.Record{record})
+	c := NewCoordinator(credential.Verifier{}, nil)
+	c.InstallCredentials(first)
+	second, _ := credential.NewValidatedSnapshot(instance, 2, nil)
+	c.InstallCredentials(second)
+	a := &attempt{coordinator: c, live: true, handle: credential.AuthHandle{RecordID: id, Generation: 1}}
+	c.snapshot = &second
+	if _, got := c.BeginSetup(a); got.String() != "credential_changed" {
+		t.Fatalf("stale setup = %s", got)
+	}
+	var count int
+	c.SetTerminalObserver(func(TerminalEvent) { count++ })
+	a.Release(connect("client_disconnected"))
+	a.Release(connect("client_disconnected"))
+	if count != 1 {
+		t.Fatalf("observer count=%d", count)
+	}
+}

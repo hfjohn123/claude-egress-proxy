@@ -24,8 +24,12 @@ func (t *tunnel) Release(v contract.CloseResult, b contract.ByteTotals) bool {
 		return false
 	}
 	t.coordinator.mu.Lock()
-	defer t.coordinator.mu.Unlock()
-	return t.releaseLocked(v, b)
+	ok := t.releaseLocked(v, b)
+	t.coordinator.mu.Unlock()
+	if ok {
+		t.coordinator.notify(TerminalEvent{CloseResult: v, Bytes: b})
+	}
+	return ok
 }
 func (t *tunnel) releaseLocked(result contract.CloseResult, bytes contract.ByteTotals) bool {
 	if t.released {

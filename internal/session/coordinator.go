@@ -30,24 +30,42 @@ const (
 )
 
 type Lease interface{ Release() bool }
+type TerminalEvent struct {
+	ConnectResult contract.ConnectResult
+	CloseResult   contract.CloseResult
+	Bytes         contract.ByteTotals
+}
 type Coordinator struct {
-	mu          sync.Mutex
-	verifier    credential.Verifier
-	auth        *admission.Authentication
-	snapshot    *credential.ValidatedSnapshot
-	highWater   uint64
-	revoked     map[credential.RecordID]struct{}
-	unavailable bool
-	draining    bool
-	readiness   map[contract.ReadinessPredicate]bool
-	handoffs    map[*handoff]struct{}
-	pending     map[*reservation]struct{}
-	tunnels     map[*tunnel]struct{}
-	changed     chan struct{}
+	mu                sync.Mutex
+	verifier          credential.Verifier
+	auth              *admission.Authentication
+	snapshot          *credential.ValidatedSnapshot
+	highWater         uint64
+	revoked           map[credential.RecordID]struct{}
+	unavailable       bool
+	draining          bool
+	readiness         map[contract.ReadinessPredicate]bool
+	handoffs          map[*handoff]struct{}
+	pending           map[*reservation]struct{}
+	tunnels           map[*tunnel]struct{}
+	changed           chan struct{}
+	perDeviceCapacity int
+	observer          func(TerminalEvent)
 }
 
 func NewCoordinator(verifier credential.Verifier, auth *admission.Authentication) *Coordinator {
-	return &Coordinator{verifier: verifier, auth: auth, unavailable: true, revoked: make(map[credential.RecordID]struct{}), readiness: make(map[contract.ReadinessPredicate]bool), handoffs: make(map[*handoff]struct{}), pending: make(map[*reservation]struct{}), tunnels: make(map[*tunnel]struct{}), changed: make(chan struct{})}
+	return NewCoordinatorWithCapacity(verifier, auth, contract.V1().PerDeviceCapacityDefault)
+}
+func NewCoordinatorWithCapacity(verifier credential.Verifier, auth *admission.Authentication, perDevice int) *Coordinator {
+	if perDevice < contract.V1().PerDeviceCapacityMin || perDevice > contract.V1().PerDeviceCapacityMax {
+		perDevice = contract.V1().PerDeviceCapacityDefault
+	}
+	return &Coordinator{verifier: verifier, auth: auth, perDeviceCapacity: perDevice, unavailable: true, revoked: make(map[credential.RecordID]struct{}), readiness: make(map[contract.ReadinessPredicate]bool), handoffs: make(map[*handoff]struct{}), pending: make(map[*reservation]struct{}), tunnels: make(map[*tunnel]struct{}), changed: make(chan struct{})}
+}
+func (c *Coordinator) SetTerminalObserver(observer func(TerminalEvent)) {
+	c.mu.Lock()
+	c.observer = observer
+	c.mu.Unlock()
 }
 func connect(value string) contract.ConnectResult {
 	r, ok := contract.ParseConnectResult(value)
@@ -72,6 +90,14 @@ func closeResult(value string) contract.CloseResult {
 }
 
 func (c *Coordinator) signalLocked() { close(c.changed); c.changed = make(chan struct{}) }
+func (c *Coordinator) notify(e TerminalEvent) {
+	c.mu.Lock()
+	f := c.observer
+	c.mu.Unlock()
+	if f != nil {
+		f(e)
+	}
+}
 func (c *Coordinator) InstallCredentials(next credential.ValidatedSnapshot) InstallResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -181,6 +207,10 @@ func (c *Coordinator) BeginSetup(a Attempt) (Handoff, contract.ConnectResult) {
 		x.releaseLocked(connect("credential_changed"))
 		return nil, connect("credential_changed")
 	}
+	if _, stillActive := c.snapshot.AuthHandle(x.handle.RecordID); !stillActive {
+		x.releaseLocked(connect("credential_changed"))
+		return nil, connect("credential_changed")
+	}
 	h := newHandoff(c, &publicLease{lease: &x.lease}, x)
 	x.live = false
 	c.handoffs[h] = struct{}{}
@@ -215,7 +245,7 @@ func (c *Coordinator) Transfer(h Handoff) (Reservation, contract.ConnectResult) 
 			owned++
 		}
 	}
-	if owned >= contract.V1().PerDeviceCapacityMax {
+	if owned >= c.perDeviceCapacity {
 		return nil, connect("device_capacity")
 	}
 	r := &reservation{coordinator: c, handoff: x, handle: x.attempt.handle}

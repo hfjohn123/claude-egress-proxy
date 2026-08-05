@@ -23,8 +23,12 @@ func (r *reservation) Release(v contract.ConnectResult) bool {
 		return false
 	}
 	r.coordinator.mu.Lock()
-	defer r.coordinator.mu.Unlock()
-	return r.releaseLocked(v)
+	ok := r.releaseLocked(v)
+	r.coordinator.mu.Unlock()
+	if ok {
+		r.coordinator.notify(TerminalEvent{ConnectResult: v})
+	}
+	return ok
 }
 func (r *reservation) releaseLocked(result contract.ConnectResult) bool {
 	if r.released {
