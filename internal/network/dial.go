@@ -10,6 +10,7 @@ import (
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
 	"github.com/hfjohn123/claude-egress-proxy/internal/policy"
+	"github.com/hfjohn123/claude-egress-proxy/internal/timebase"
 )
 
 var (
@@ -54,13 +55,14 @@ type Dialer struct {
 	Source   SourceChecker
 	Dial     func(context.Context, string, string, netip.Addr) (net.Conn, error)
 	Snapshot func() PublicSelfSnapshot
+	Now      func() time.Time
 }
 
 // DialCandidates dials already-resolved candidates without a hostname lookup.
 func (d Dialer) DialCandidates(ctx context.Context, _ string, port uint16, candidates []netip.Addr, snapshot PublicSelfSnapshot) (net.Conn, netip.Addr, error) {
 	ctx, cancel := context.WithTimeout(ctx, contract.V1().Dial)
 	defer cancel()
-	if !freshPublicSelf(snapshot) {
+	if !freshPublicSelfAt(snapshot, d.now()) {
 		return nil, netip.Addr{}, ErrPublicSelfStale
 	}
 	if d.Snapshot == nil {
@@ -83,7 +85,7 @@ func (d Dialer) DialCandidates(ctx context.Context, _ string, port uint16, candi
 	var last error
 	for _, candidate := range candidates {
 		current := d.Snapshot()
-		if current.Generation != snapshot.Generation || !freshPublicSelf(current) {
+		if current.Generation != snapshot.Generation || !freshPublicSelfAt(current, d.now()) {
 			return nil, netip.Addr{}, ErrPublicSelfStale
 		}
 		snapshot = current
@@ -108,7 +110,18 @@ func (d Dialer) DialCandidates(ctx context.Context, _ string, port uint16, candi
 }
 
 func freshPublicSelf(snapshot PublicSelfSnapshot) bool {
-	return snapshot.Outcome.String() == "positive" && snapshot.ObservedAt.After(time.Now().Add(-5*time.Second)) && !snapshot.ObservedAt.After(time.Now().Add(time.Second))
+	return freshPublicSelfAt(snapshot, timebase.Real{}.Now())
+}
+
+func freshPublicSelfAt(snapshot PublicSelfSnapshot, now time.Time) bool {
+	return snapshot.Outcome.String() == "positive" && snapshot.ObservedAt.After(now.Add(-5*time.Second)) && !snapshot.ObservedAt.After(now.Add(time.Second))
+}
+
+func (d Dialer) now() time.Time {
+	if d.Now != nil {
+		return d.Now()
+	}
+	return timebase.Real{}.Now()
 }
 
 func literalDial(ctx context.Context, network, address string, source netip.Addr) (net.Conn, error) {
