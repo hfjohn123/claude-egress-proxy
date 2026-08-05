@@ -63,6 +63,9 @@ func (d Dialer) DialCandidates(ctx context.Context, _ string, port uint16, candi
 	if !freshPublicSelf(snapshot) {
 		return nil, netip.Addr{}, ErrPublicSelfStale
 	}
+	if d.Snapshot == nil {
+		return nil, netip.Addr{}, ErrPublicSelfStale
+	}
 	candidates, err := ClassifyCandidates(candidates)
 	if err != nil {
 		return nil, netip.Addr{}, err
@@ -79,14 +82,12 @@ func (d Dialer) DialCandidates(ctx context.Context, _ string, port uint16, candi
 	}
 	var last error
 	for _, candidate := range candidates {
-		if d.Snapshot != nil {
-			current := d.Snapshot()
-			if current.Generation != snapshot.Generation || !freshPublicSelf(current) {
-				return nil, netip.Addr{}, ErrPublicSelfStale
-			}
-			snapshot = current
-			self = snapshot.addressSet()
+		current := d.Snapshot()
+		if current.Generation != snapshot.Generation || !freshPublicSelf(current) {
+			return nil, netip.Addr{}, ErrPublicSelfStale
 		}
+		snapshot = current
+		self = snapshot.addressSet()
 		if _, ok := self[candidate]; ok {
 			return nil, netip.Addr{}, ErrSelfAddress
 		}

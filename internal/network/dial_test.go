@@ -49,10 +49,11 @@ func TestClassifyCandidatesKeepsFirstSeenPublicIPv4(t *testing.T) {
 }
 
 func TestDialCandidatesRejectsSelfAddress(t *testing.T) {
-	d := Dialer{}
+	snapshot := PublicSelfSnapshot{Generation: 1, ObservedAt: time.Now(), Outcome: publicSelfOutcome("positive"), Addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8")}}
+	d := Dialer{Snapshot: func() PublicSelfSnapshot { return snapshot }}
 	_, _, err := d.DialCandidates(context.Background(), "example.com", 443,
 		[]netip.Addr{netip.MustParseAddr("8.8.8.8")},
-		PublicSelfSnapshot{Addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8")}})
+		snapshot)
 	if err == nil {
 		t.Fatal("self address accepted")
 	}

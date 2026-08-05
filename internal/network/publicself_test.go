@@ -15,3 +15,21 @@ func TestPublicSelfRefreshPublishesCanonicalUnion(t *testing.T) {
 		t.Fatalf("snapshot = %#v", s)
 	}
 }
+
+func TestPublicSelfOverflowPublishesFailure(t *testing.T) {
+	addresses := make([]netip.Addr, 65)
+	for i := range addresses {
+		addresses[i] = netip.AddrFrom4([4]byte{8, 8, 8, byte(i + 1)})
+	}
+	p := NewPublicSelf(addresses, nil, "")
+	if got := p.Refresh(context.Background()); got.Outcome.String() != "failure" {
+		t.Fatalf("outcome = %v, want failure", got.Outcome)
+	}
+}
+
+func TestPublicSelfLoopbackModeIsSuccessEmpty(t *testing.T) {
+	p := NewPublicSelfForMode(PublicSelfLoopback, nil, nil, "")
+	if got := p.Refresh(context.Background()); got.Outcome.String() != "success_empty" {
+		t.Fatalf("outcome = %v, want success_empty", got.Outcome)
+	}
+}
