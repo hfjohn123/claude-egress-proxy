@@ -78,6 +78,23 @@ func (i *Inspector) Load(ctx context.Context) (Snapshot, error) {
 	return load(i.root, i.instance, i.policy)
 }
 
+// LoadVerifier applies the metrics-enabled startup gate. Disabled metrics do
+// not touch the artifact; enabled metrics require a valid current artifact.
+func LoadVerifier(ctx context.Context, root securefs.ReadRoot, instance [16]byte, policy securefs.FilePolicy, enabled bool) (Verifier, error) {
+	if !enabled {
+		return DummyVerifier(), nil
+	}
+	i, err := OpenInspector(root, instance, policy)
+	if err != nil {
+		return Verifier{}, err
+	}
+	snapshot, err := i.Load(ctx)
+	if err != nil {
+		return Verifier{}, err
+	}
+	return NewVerifier(snapshot), nil
+}
+
 func (s *Store) Load(ctx context.Context) (Snapshot, error) {
 	if s == nil || ctx == nil {
 		return Snapshot{}, ErrInvalid

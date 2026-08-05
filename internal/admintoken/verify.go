@@ -37,17 +37,16 @@ func (v Verifier) Verify(header []byte) Result {
 	return Result{Authorized: ok && equal == 1}
 }
 func parseBearer(header []byte, secret *[32]byte) bool {
-	if len(header) != len("Bearer ")+43 || len(header) < 7 || !bearerScheme(header[:6]) || header[6] != ' ' {
+	if len(header) != len("Bearer ")+43 || len(header) < 7 || string(header[:6]) != "Bearer" || header[6] != ' ' {
 		return false
 	}
 	n, err := base64.RawURLEncoding.Decode(secret[:], header[7:])
 	if err != nil || n != len(secret) {
 		return false
 	}
+	// Canonical spelling is a grammar check, not a secret comparison. Keep the
+	// verifier's single constant-time comparison reserved for the digest.
 	var canonical [43]byte
 	base64.RawURLEncoding.Encode(canonical[:], secret[:])
-	return subtle.ConstantTimeCompare(canonical[:], header[7:]) == 1
-}
-func bearerScheme(b []byte) bool {
-	return len(b) == 6 && (b[0] == 'B' || b[0] == 'b') && (b[1] == 'E' || b[1] == 'e') && (b[2] == 'A' || b[2] == 'a') && (b[3] == 'R' || b[3] == 'r') && (b[4] == 'E' || b[4] == 'e') && (b[5] == 'R' || b[5] == 'r')
+	return string(canonical[:]) == string(header[7:])
 }

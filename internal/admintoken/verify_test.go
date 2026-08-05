@@ -3,6 +3,8 @@ package admintoken
 import (
 	"encoding/base64"
 	"testing"
+
+	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
 )
 
 func TestVerifierUsesOneHashAndCompareForAllHeaders(t *testing.T) {
@@ -25,6 +27,25 @@ func TestVerifierUsesOneHashAndCompareForAllHeaders(t *testing.T) {
 		if got.Authorized != (string(header) == string(valid)) || hashes != 1 || compares != 1 {
 			t.Fatalf("header=%q authorized=%v hashes=%d compares=%d", header, got.Authorized, hashes, compares)
 		}
+	}
+}
+
+func TestVerifierRequiresCaseSensitiveBearerScheme(t *testing.T) {
+	secret := [32]byte{7}
+	salt := [16]byte{8}
+	v := NewVerifier(Snapshot{salt: salt, verifier: digest(salt, secret)})
+	encoded := base64.RawURLEncoding.EncodeToString(secret[:])
+	for _, scheme := range []string{"bearer", "BEARER", "BeArEr"} {
+		if v.Verify([]byte(scheme + " " + encoded)).Authorized {
+			t.Fatalf("scheme %q accepted", scheme)
+		}
+	}
+}
+
+func TestDisabledMetricsDoNotLoadArtifact(t *testing.T) {
+	v, err := LoadVerifier(nil, nil, [16]byte{}, securefs.FilePolicy{}, false)
+	if err != nil || v.Verify(nil).Authorized {
+		t.Fatalf("disabled load = %#v, %v", v, err)
 	}
 }
 
