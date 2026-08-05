@@ -137,6 +137,9 @@ func (r *Repository) mutate(ctx context.Context, change func(ValidatedSnapshot) 
 				return err
 			}
 		}
+		if current.Generation() >= (1<<53)-1 {
+			return ErrGenerationExhausted
+		}
 		successor, err := change(current)
 		if err != nil {
 			return err

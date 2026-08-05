@@ -3,6 +3,7 @@ package credential
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -106,5 +107,74 @@ func TestCredentialMutationStorageProbe(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCredentialMutationRejectsExhaustedGenerationWithoutPublication(t *testing.T) {
+	root, policy := credentialMutableTestRoot(t)
+	var instance [16]byte
+	instance[0] = 1
+	repo, err := OpenRepository(root, instance, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := NewValidatedSnapshot(instance, (1<<53)-1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := EncodeCanonical(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = root.WithExclusiveLock(context.Background(), lockName, lockPolicy(policy), func(lock securefs.LockedFile) error {
+		if err := writeVirginCheckpoint(lock, instance); err != nil {
+			return err
+		}
+		boundary, err := lock.Publish(context.Background(), storeName, storeTemp, data, policy, securefs.AbsentTarget, securefs.NoFaults{})
+		if err != nil {
+			return err
+		}
+		if !boundary.NamespacePublished || !boundary.TargetDurable {
+			t.Fatalf("boundary = %+v", boundary)
+		}
+		return writeCheckpoint(lock, instance, snapshot, policy)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requiredStore := policy
+	requiredStore.Presence = securefs.Required
+	beforeStore, _, err := root.ReadFile(storeName, requiredStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requiredLock := lockPolicy(policy)
+	requiredLock.Presence = securefs.Required
+	beforeLock, _, err := root.ReadFile(lockName, requiredLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = repo.Add(context.Background(), "phone", bytes.NewReader(bytes.Repeat([]byte{2}, 48)), time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC))
+	if !errors.Is(err, ErrGenerationExhausted) {
+		t.Fatalf("Add error = %v, want ErrGenerationExhausted", err)
+	}
+	after, err := repo.ReadCoherent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Generation() != snapshot.Generation() || len(after.Records()) != 0 {
+		t.Fatalf("state changed: generation=%d records=%d", after.Generation(), len(after.Records()))
+	}
+	afterStore, _, err := root.ReadFile(storeName, requiredStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterLock, _, err := root.ReadFile(lockName, requiredLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterStore, beforeStore) || !bytes.Equal(afterLock, beforeLock) {
+		t.Fatal("exhausted mutation changed store or checkpoint bytes")
 	}
 }
