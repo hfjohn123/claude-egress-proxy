@@ -156,8 +156,9 @@ func TestInstallRejectsPurgedAttemptAndObserverRunsOnce(t *testing.T) {
 	}
 	var count int
 	c.SetTerminalObserver(func(TerminalEvent) { count++ })
-	a.Release(connect("client_disconnected"))
-	a.Release(connect("client_disconnected"))
+	b := &attempt{coordinator: c, live: true}
+	b.Release(connect("client_disconnected"))
+	b.Release(connect("client_disconnected"))
 	if count != 1 {
 		t.Fatalf("observer count=%d", count)
 	}
