@@ -107,7 +107,7 @@ func (r *Repository) Inspect(ctx context.Context, mode InspectMode) (Inspection,
 	var result Inspection
 	err := r.root.WithExclusiveLock(ctx, lockName, lockPolicy(r.policy), func(lock securefs.LockedFile) error {
 		var err error
-		result, err = inspectFiles(lock, r.instance, r.policy)
+		result, err = inspectFiles(heldLockReader{LockedFile: lock}, r.instance, r.policy)
 		if err != nil {
 			return err
 		}
@@ -157,11 +157,15 @@ func (r *Repository) commitLocked(ctx context.Context, lock securefs.LockedFile,
 	if err != nil {
 		return ErrInvalid
 	}
-	in, err := inspectFiles(lock, r.instance, r.policy)
+	in, err := inspectFiles(heldLockReader{LockedFile: lock}, r.instance, r.policy)
 	if err != nil {
 		return err
 	}
-	if in.State == StoreSuccessor || in.State == StoreInterruptedBootstrap {
+	if in.State == StoreInterruptedBootstrap && in.Snapshot.Generation() == 0 {
+		// WithExclusiveLock creates the persistent lock before this callback.
+		// Its first empty incarnation is the safe virgin-store state.
+		in.State = StoreVirgin
+	} else if in.State == StoreSuccessor || in.State == StoreInterruptedBootstrap {
 		if err := writeCheckpoint(lock, r.instance, in.Snapshot, r.policy); err != nil {
 			return err
 		}
@@ -192,7 +196,7 @@ func (r *Repository) commitLocked(ctx context.Context, lock securefs.LockedFile,
 		return ErrRollbackConflict
 	}
 	mode := securefs.AbsentTarget
-	if in.State == StoreCoherent {
+	if current != 0 {
 		mode = securefs.PresentTarget
 	}
 	boundary, err := lock.Publish(ctx, storeName, storeTemp, data, r.policy, mode, securefs.NoFaults{})
@@ -208,6 +212,55 @@ func (r *Repository) commitLocked(ctx context.Context, lock securefs.LockedFile,
 type storeReader interface {
 	Inspect(string, securefs.FilePolicy) (securefs.FileState, error)
 	ReadFile(string, securefs.FilePolicy) ([]byte, securefs.FileState, error)
+}
+
+// heldLockReader reads the lock journal through its already locked handle.
+// Reopening it through the root would violate the process's own byte-range
+// lock on Windows. Other files still use the retained root beneath the lock.
+type heldLockReader struct {
+	securefs.LockedFile
+}
+
+func (r heldLockReader) Inspect(name string, policy securefs.FilePolicy) (securefs.FileState, error) {
+	if name != lockName {
+		return r.LockedFile.Inspect(name, policy)
+	}
+	if policy.Kind != securefs.RegularFile {
+		return securefs.FileState{}, securefs.ErrUnsafePath
+	}
+	if policy.Presence == securefs.MustBeAbsent {
+		return securefs.FileState{}, securefs.ErrAlreadyExists
+	}
+	size, err := r.Size()
+	if err != nil {
+		return securefs.FileState{}, err
+	}
+	if policy.MaxBytes > 0 && size > policy.MaxBytes {
+		return securefs.FileState{}, securefs.ErrTooLarge
+	}
+	return securefs.FileState{Present: true, Identity: r.Identity(), Kind: securefs.RegularFile, Size: size}, nil
+}
+
+func (r heldLockReader) ReadFile(name string, policy securefs.FilePolicy) ([]byte, securefs.FileState, error) {
+	if name != lockName {
+		return r.LockedFile.ReadFile(name, policy)
+	}
+	if policy.Presence != securefs.Required || policy.Kind != securefs.RegularFile {
+		return nil, securefs.FileState{}, securefs.ErrUnsafePath
+	}
+	state, err := r.Inspect(name, policy)
+	if err != nil {
+		return nil, securefs.FileState{}, err
+	}
+	data := make([]byte, state.Size)
+	if len(data) == 0 {
+		return data, state, nil
+	}
+	n, err := r.ReadAt(data, 0)
+	if err != nil || n != len(data) {
+		return nil, securefs.FileState{}, securefs.ErrUnsafePath
+	}
+	return data, state, nil
 }
 
 func inspectFiles(root storeReader, instance [16]byte, policy securefs.FilePolicy) (Inspection, error) {

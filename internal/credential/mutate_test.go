@@ -1,0 +1,110 @@
+package credential
+
+import (
+	"bytes"
+	"context"
+	"testing"
+	"time"
+
+	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
+)
+
+func TestCredentialMutationsAddRevokePurge(t *testing.T) {
+	root, policy := credentialMutableTestRoot(t)
+	var instance [16]byte
+	instance[0] = 1
+	repo, err := OpenRepository(root, instance, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	record, secret, err := repo.Add(context.Background(), "laptop-1", bytes.NewReader(bytes.Repeat([]byte{7}, 48)), now)
+	if err != nil {
+		in, inspectErr := repo.Inspect(context.Background(), ValidateOnly)
+		t.Fatalf("%v; inspection=%+v inspectErr=%v", err, in, inspectErr)
+	}
+	if record.Device != "laptop-1" || record.State != Active || record.CreatedAt != now || record.ID.IsZero() {
+		t.Fatalf("add record = %+v", record)
+	}
+	if secret == ([32]byte{}) {
+		t.Fatal("secret is zero")
+	}
+	snapshot, err := repo.ReadCoherent(context.Background())
+	if err != nil || snapshot.Generation() != 1 || len(snapshot.Records()) != 1 {
+		t.Fatalf("first snapshot = %+v, %v", snapshot, err)
+	}
+	revoked, err := repo.Revoke(context.Background(), record.ID)
+	if err != nil || revoked.State != Revoked {
+		t.Fatalf("revoke = %+v, %v", revoked, err)
+	}
+	snapshot, err = repo.ReadCoherent(context.Background())
+	if err != nil || snapshot.Generation() != 2 || snapshot.Records()[0].State != Revoked {
+		t.Fatalf("revoked snapshot = %+v, %v", snapshot, err)
+	}
+	if err := repo.Purge(context.Background(), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = repo.ReadCoherent(context.Background())
+	if err != nil || snapshot.Generation() != 3 || len(snapshot.Records()) != 0 {
+		t.Fatalf("purged snapshot = %+v, %v", snapshot, err)
+	}
+}
+
+func TestCredentialAddRejectsDuplicateWithoutPublication(t *testing.T) {
+	root, policy := credentialMutableTestRoot(t)
+	var instance [16]byte
+	repo, err := OpenRepository(root, instance, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	if _, _, err := repo.Add(context.Background(), "phone", bytes.NewReader(bytes.Repeat([]byte{1}, 48)), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := repo.Add(context.Background(), "phone", bytes.NewReader(bytes.Repeat([]byte{2}, 48)), now); err == nil {
+		t.Fatal("duplicate add succeeded")
+	}
+	snapshot, err := repo.ReadCoherent(context.Background())
+	if err != nil || snapshot.Generation() != 1 || len(snapshot.Records()) != 1 {
+		t.Fatalf("duplicate changed state: %+v, %v", snapshot, err)
+	}
+}
+
+func TestCredentialMutationStorageProbe(t *testing.T) {
+	root, policy := credentialMutableTestRoot(t)
+	var instance [16]byte
+	var id RecordID
+	for i := range id {
+		id[i] = 7
+	}
+	var secret [32]byte
+	secret[0] = 7
+	record := Record{ID: id, Device: "laptop-1", CreatedAt: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC), State: Active, Verifier: verifierDigest(id, "laptop-1", secret)}
+	snapshot, err := NewValidatedSnapshot(instance, 1, []Record{record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := EncodeCanonical(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = root.WithExclusiveLock(context.Background(), lockName, lockPolicy(policy), func(lock securefs.LockedFile) error {
+		if err := writeVirginCheckpoint(lock, instance); err != nil {
+			return err
+		}
+		if err := writeVirginCheckpoint(lock, instance); err != nil {
+			return err
+		}
+		boundary, err := lock.Publish(context.Background(), storeName, storeTemp, data, policy, securefs.AbsentTarget, securefs.NoFaults{})
+		if err != nil {
+			return err
+		}
+		if !boundary.NamespacePublished || !boundary.TargetDurable {
+			t.Fatalf("boundary = %+v", boundary)
+		}
+		return writeCheckpoint(lock, instance, snapshot, policy)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
