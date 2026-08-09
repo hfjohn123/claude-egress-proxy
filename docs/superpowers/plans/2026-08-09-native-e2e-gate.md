@@ -131,7 +131,7 @@ Expected: build failure because startDNSFixture and fixtureResolver do not exist
 
 - [ ] **Step 7: Implement bounded UDP/TCP DNS**
 
-Use dnsmessage.Parser. Require one A/IN question for origin.e2e.invalid. Return one zero-TTL A record with 192.0.0.10; return NXDOMAIN otherwise. Reject malformed, multi-question, non-A, and non-IN input. Cap UDP packets at 512 bytes and TCP length-prefixed messages at 4096 bytes. Close UDP and TCP listeners exactly once.
+Use dnsmessage.Parser. Require one A/IN question. The focused fixture test returns one zero-TTL A record for its configured origin and NXDOMAIN otherwise. The production E2E configures exact answers for proxy.e2e.invalid at 192.0.0.9 and origin.e2e.invalid at 192.0.0.10 because supplied TLS resolves its hostname for public-self state. Reject malformed, multi-question, non-A, and non-IN input. Cap UDP packets at 512 bytes and TCP length-prefixed messages at 4096 bytes. Close UDP and TCP listeners exactly once.
 
 ~~~go
 type dnsFixture struct {

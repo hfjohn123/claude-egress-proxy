@@ -104,8 +104,7 @@ func redact(text string, forbidden ...string) string {
 
 type dnsFixture struct {
 	address  string
-	allowed  dnsmessage.Name
-	answer   [4]byte
+	answers  map[dnsmessage.Name][4]byte
 	udp      net.PacketConn
 	tcp      net.Listener
 	cancel   context.CancelFunc
@@ -116,12 +115,23 @@ type dnsFixture struct {
 }
 
 func startDNSFixture(ctx context.Context, address, allowedHost string, answer netip.Addr) (*dnsFixture, error) {
-	if ctx == nil || !answer.Is4() || answer.Is4In6() {
+	return startDNSFixtureForAnswers(ctx, address, map[string]netip.Addr{allowedHost: answer})
+}
+
+func startDNSFixtureForAnswers(ctx context.Context, address string, rawAnswers map[string]netip.Addr) (*dnsFixture, error) {
+	if ctx == nil || len(rawAnswers) == 0 || len(rawAnswers) > 8 {
 		return nil, errors.New("invalid DNS fixture configuration")
 	}
-	allowed, err := dnsmessage.NewName(strings.TrimSuffix(allowedHost, ".") + ".")
-	if err != nil {
-		return nil, fmt.Errorf("allowed DNS name: %w", err)
+	answers := make(map[dnsmessage.Name][4]byte, len(rawAnswers))
+	for rawName, answer := range rawAnswers {
+		if !answer.Is4() || answer.Is4In6() {
+			return nil, errors.New("invalid DNS fixture configuration")
+		}
+		name, err := dnsmessage.NewName(strings.TrimSuffix(rawName, ".") + ".")
+		if err != nil {
+			return nil, fmt.Errorf("allowed DNS name: %w", err)
+		}
+		answers[name] = answer.As4()
 	}
 	tcp, err := net.Listen("tcp4", address)
 	if err != nil {
@@ -133,7 +143,7 @@ func startDNSFixture(ctx context.Context, address, allowedHost string, answer ne
 		return nil, fmt.Errorf("listen DNS UDP: %w", err)
 	}
 	fixtureContext, cancel := context.WithCancel(ctx)
-	f := &dnsFixture{address: tcp.Addr().String(), allowed: allowed, answer: answer.As4(), udp: udp, tcp: tcp, cancel: cancel, done: make(chan struct{})}
+	f := &dnsFixture{address: tcp.Addr().String(), answers: answers, udp: udp, tcp: tcp, cancel: cancel, done: make(chan struct{})}
 	var workers sync.WaitGroup
 	workers.Add(2)
 	go func() { defer workers.Done(); f.serveUDP(fixtureContext) }()
@@ -247,7 +257,8 @@ func (f *dnsFixture) response(request []byte) ([]byte, error) {
 		return nil, errors.New("multiple DNS questions")
 	}
 	f.queries.Add(1)
-	allowed := question.Name == f.allowed && question.Type == dnsmessage.TypeA && question.Class == dnsmessage.ClassINET
+	answer, known := f.answers[question.Name]
+	allowed := known && question.Type == dnsmessage.TypeA && question.Class == dnsmessage.ClassINET
 	responseHeader := dnsmessage.Header{ID: header.ID, Response: true, Authoritative: true}
 	if !allowed {
 		responseHeader.RCode = dnsmessage.RCodeNameError
@@ -265,7 +276,7 @@ func (f *dnsFixture) response(request []byte) ([]byte, error) {
 			return nil, err
 		}
 		resource := dnsmessage.ResourceHeader{Name: question.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 0}
-		if err := builder.AResource(resource, dnsmessage.AResource{A: f.answer}); err != nil {
+		if err := builder.AResource(resource, dnsmessage.AResource{A: answer}); err != nil {
 			return nil, err
 		}
 	}

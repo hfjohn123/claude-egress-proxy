@@ -221,7 +221,7 @@ func readConnectStatus(reader *bufio.Reader) (int, error) {
 			return "", errors.New("CONNECT response too large")
 		}
 		if err != nil || !strings.HasSuffix(line, "\r\n") {
-			return "", errors.New("invalid CONNECT response")
+			return "", fmt.Errorf("invalid CONNECT response: bytes=%d read=%v", len(line), err)
 		}
 		return line, nil
 	}

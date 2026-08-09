@@ -55,10 +55,12 @@ already classifies as global IPv4:
 
 The configuration uses `proxy.e2e.invalid` as the supplied-certificate name,
 `origin.e2e.invalid` as its single custom exact destination, an explicit
-resolver at `127.0.0.1:5353`, and `public_self_ipv4s: [192.0.0.9]`. The DNS
-fixture returns only `192.0.0.10` for the exact origin name and rejects every
-other question. No veth pair, default route, or external namespace interface is
-created, so the test cannot reach the host or Internet network.
+resolver at `127.0.0.1:5353`, and `public_self_ipv4s: [192.0.0.9]`. Supplied TLS
+refreshes public-self state through the configured resolver, so the DNS fixture
+returns `192.0.0.9` for the exact proxy name and `192.0.0.10` for the exact
+origin name, rejecting every other question. No veth pair, default route, or
+external namespace interface is created, so the test cannot reach the host or
+Internet network.
 
 ## Filesystem and Identity Contract
 

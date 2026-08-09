@@ -3,3 +3,4 @@
 *.go text eol=lf
 go.mod text eol=lf
 go.sum text eol=lf
+scripts/verify-e2e.sh text eol=lf

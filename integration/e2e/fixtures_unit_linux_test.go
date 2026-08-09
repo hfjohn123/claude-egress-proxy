@@ -62,6 +62,26 @@ func TestDNSFixtureAnswersOnlyAllowedOrigin(t *testing.T) {
 	}
 }
 
+func TestDNSFixtureAnswersConfiguredNames(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fixture, err := startDNSFixtureForAnswers(ctx, "127.0.0.1:0", map[string]netip.Addr{
+		"proxy.e2e.invalid":  netip.MustParseAddr("192.0.0.9"),
+		"origin.e2e.invalid": netip.MustParseAddr("192.0.0.10"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.Close()
+	resolver := fixtureResolver(fixture.Address())
+	for name, want := range map[string]string{"proxy.e2e.invalid": "192.0.0.9", "origin.e2e.invalid": "192.0.0.10"} {
+		got, err := resolver.LookupNetIP(ctx, "ip4", name)
+		if err != nil || len(got) != 1 || got[0].String() != want {
+			t.Fatalf("%s answer = %v, %v", name, got, err)
+		}
+	}
+}
+
 func parseLeaf(t *testing.T, raw []byte) *x509.Certificate {
 	t.Helper()
 	block, rest := pem.Decode(raw)
