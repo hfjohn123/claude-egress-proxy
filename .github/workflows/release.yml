@@ -120,8 +120,10 @@ jobs:
           mkdir -p out/layout/amd64 out/layout/arm64
           tar -xf out/oci/amd64/linux-amd64.tar -C out/layout/amd64
           tar -xf out/oci/arm64/linux-arm64.tar -C out/layout/arm64
+          amd64_digest="$(jq -er '.manifests | if length == 1 then .[0].digest else error("expected one OCI root descriptor") end' out/layout/amd64/index.json)"
+          arm64_digest="$(jq -er '.manifests | if length == 1 then .[0].digest else error("expected one OCI root descriptor") end' out/layout/arm64/index.json)"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
-          docker buildx imagetools create --tag "$IMAGE_TAG" oci-layout://out/layout/amd64 oci-layout://out/layout/arm64
+          docker buildx imagetools create --tag "$IMAGE_TAG" "oci-layout://out/layout/amd64@$amd64_digest" "oci-layout://out/layout/arm64@$arm64_digest"
 
   release-evidence:
     needs: [secrets, build-binaries, scan-linux-amd64, scan-linux-arm64]
@@ -151,7 +153,13 @@ jobs:
             layout="$(mktemp -d)"
             trap 'rm -rf "$layout"' EXIT
             tar -xf "$archive" -C "$layout"
-            mapfile -t manifests < <(jq -r '.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest | split(":")[1]' "$layout/index.json")
+            index="$layout/index.json"
+            while jq -e '(.manifests | length) == 1 and .manifests[0].mediaType == "application/vnd.oci.image.index.v1+json"' "$index" >/dev/null; do
+              index_digest="$(jq -er '.manifests[0].digest | sub("^sha256:"; "")' "$index")"
+              index="$layout/blobs/sha256/$index_digest"
+              [[ -f "$index" ]] || { echo "missing nested OCI index for $target" >&2; exit 1; }
+            done
+            mapfile -t manifests < <(jq -r '.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest | split(":")[1]' "$index")
             ((${#manifests[@]} > 0)) || { echo "missing attestation manifest for $target" >&2; exit 1; }
             found=0
             for manifest in "${manifests[@]}"; do

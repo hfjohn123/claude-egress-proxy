@@ -48,6 +48,12 @@ func TestWorkflowPolicy(t *testing.T) {
 		"attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8",
 		"release-evidence",
 	)
+	requireAll(t, release,
+		"oci-layout://out/layout/amd64@$amd64_digest",
+		"oci-layout://out/layout/arm64@$arm64_digest",
+		"while jq -e",
+		"application/vnd.oci.image.index.v1+json",
+	)
 	if strings.Contains(ci+release, "RequestURI") {
 		t.Fatal("CI must not add a custom HTTP parser fuzz target")
 	}
