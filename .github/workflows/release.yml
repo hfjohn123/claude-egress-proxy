@@ -10,9 +10,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
-  attestations: write
-  id-token: write
 
 jobs:
   secrets:
@@ -32,6 +29,11 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491
         with: { go-version: '1.26.5' }
+      - shell: pwsh
+        run: pwsh -NoProfile -File scripts/verify-generated.ps1
+      - shell: pwsh
+        run: pwsh -NoProfile -File scripts/verify-public-data.ps1
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - name: four reproducible targets
         run: |
           mkdir -p out/release
@@ -51,11 +53,9 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with: { fetch-depth: 0 }
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
-      - run: docker buildx build --platform linux/amd64 --output type=oci,dest=out/linux-amd64.tar -f deploy/docker/Dockerfile .
-      - shell: pwsh
-        run: pwsh -NoProfile -File scripts/verify-container.ps1 -Archive out/linux-amd64.tar -ReportDirectory out/scan-amd64 -SourceCommit '${{ github.sha }}' -Platform linux/amd64
+      - run: docker buildx build --platform linux/amd64 --sbom=true --provenance=mode=max --output type=oci,dest=out/linux-amd64.tar -f deploy/docker/Dockerfile .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with: { name: image-amd64, path: out, retention-days: 14 }
+        with: { name: image-amd64, path: out/linux-amd64.tar, retention-days: 14 }
 
   build-linux-arm64:
     runs-on: ubuntu-latest
@@ -63,37 +63,133 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with: { fetch-depth: 0 }
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
-      - run: docker buildx build --platform linux/arm64 --output type=oci,dest=out/linux-arm64.tar -f deploy/docker/Dockerfile .
-      - shell: pwsh
-        run: pwsh -NoProfile -File scripts/verify-container.ps1 -Archive out/linux-arm64.tar -ReportDirectory out/scan-arm64 -SourceCommit '${{ github.sha }}' -Platform linux/arm64
+      - run: docker buildx build --platform linux/arm64 --sbom=true --provenance=mode=max --output type=oci,dest=out/linux-arm64.tar -f deploy/docker/Dockerfile .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with: { name: image-arm64, path: out, retention-days: 14 }
+        with: { name: image-arm64, path: out/linux-arm64.tar, retention-days: 14 }
+
+  scan-linux-amd64:
+    needs: build-linux-amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { fetch-depth: 0 }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: image-amd64, path: out }
+      - shell: pwsh
+        run: pwsh -NoProfile -File scripts/verify-release.ps1 -Archive out/linux-amd64.tar -ReportDirectory out/scan-amd64 -Platform linux/amd64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: { name: scan-amd64, path: out/scan-amd64, retention-days: 14 }
+
+  scan-linux-arm64:
+    needs: build-linux-arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { fetch-depth: 0 }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: image-arm64, path: out }
+      - shell: pwsh
+        run: pwsh -NoProfile -File scripts/verify-release.ps1 -Archive out/linux-arm64.tar -ReportDirectory out/scan-arm64 -Platform linux/arm64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: { name: scan-arm64, path: out/scan-arm64, retention-days: 14 }
 
   publish:
-    needs: [secrets, build-linux-amd64, build-linux-arm64]
+    needs: [secrets, build-binaries, scan-linux-amd64, scan-linux-arm64]
     runs-on: ubuntu-latest
     environment: release
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_TAG: ghcr.io/${{ github.repository }}:${{ inputs.version }}
+      GHCR_USER: ${{ github.actor }}
+      GHCR_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with: { fetch-depth: 0 }
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
-      - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
-        with:
-          context: .
-          file: deploy/docker/Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/${{ github.repository }}:${{ inputs.version }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: image-amd64, path: out/oci/amd64 }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: image-arm64, path: out/oci/arm64 }
+      - name: publish scanned OCI manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/layout/amd64 out/layout/arm64
+          tar -xf out/oci/amd64/linux-amd64.tar -C out/layout/amd64
+          tar -xf out/oci/arm64/linux-arm64.tar -C out/layout/arm64
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+          docker buildx imagetools create --tag "$IMAGE_TAG" oci-layout://out/layout/amd64 oci-layout://out/layout/arm64
 
-  draft-release:
-    needs: [publish, build-binaries]
+  release-evidence:
+    needs: [secrets, build-binaries, scan-linux-amd64, scan-linux-arm64]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with: { name: release-binaries, path: out/release }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: image-amd64, path: out/oci/amd64 }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: image-arm64, path: out/oci/arm64 }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: scan-amd64, path: out/scan/amd64 }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: scan-arm64, path: out/scan/arm64 }
+      - name: extract embedded SPDX attestations
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/release/sbom
+          for target in amd64 arm64; do
+            archive="out/oci/$target/linux-$target.tar"
+            layout="$(mktemp -d)"
+            trap 'rm -rf "$layout"' EXIT
+            tar -xf "$archive" -C "$layout"
+            mapfile -t manifests < <(jq -r '.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest | split(":")[1]' "$layout/index.json")
+            ((${#manifests[@]} > 0)) || { echo "missing attestation manifest for $target" >&2; exit 1; }
+            found=0
+            for manifest in "${manifests[@]}"; do
+              mapfile -t layers < <(jq -r '.layers[] | select(.annotations["in-toto.io/predicate-type"] == "https://spdx.dev/Document") | .digest | split(":")[1]' "$layout/blobs/sha256/$manifest")
+              for layer in "${layers[@]}"; do
+                cp "$layout/blobs/sha256/$layer" "out/release/sbom/linux-$target-$layer.intoto.json"
+                found=1
+              done
+            done
+            ((found)) || { echo "missing SPDX SBOM for $target" >&2; exit 1; }
+            rm -rf "$layout"
+            trap - EXIT
+          done
+      - name: attest release binaries
+        id: binary-provenance
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-checksums: out/release/SHA256SUMS
+      - name: retain provenance bundle
+        shell: bash
+        run: cp "${{ steps.binary-provenance.outputs.bundle-path }}" out/release/provenance.intoto.jsonl
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: { name: release-evidence, path: out, retention-days: 14 }
+
+  draft-release:
+    needs: [publish, release-evidence]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: release-evidence, path: out }
       - uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8
         with:
           draft: true
           generate_release_notes: true
           tag_name: ${{ inputs.version }}
-          files: out/release/*
+          files: |
+            out/release/*
+            out/release/sbom/*.intoto.json
+            out/oci/**/*.tar
+            out/scan/**/*.json

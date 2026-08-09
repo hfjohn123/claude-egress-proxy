@@ -37,7 +37,17 @@ func TestWorkflowPolicy(t *testing.T) {
 		}
 	}
 	requireAll(t, ci, "ubuntu-latest", "windows-latest", "go vet ./...", "go test ./... -count=1", "go test -race", "FuzzAuthority", "FuzzCredentialDecode", "FuzzBasicVerifier", "FuzzFramingValues", "verify-generated.ps1", "verify-public-data.ps1", "govulncheck@v1.6.0", "verify-secrets.ps1", "verify-container.ps1", "windows/amd64", "windows/arm64", "retention-days:")
-	requireAll(t, release, "workflow_dispatch:", "draft: true", "windows/amd64", "windows/arm64", "linux/amd64", "linux/arm64", "needs: [secrets, build-linux-amd64, build-linux-arm64]")
+	requireAll(t, release, "workflow_dispatch:", "draft: true", "windows/amd64", "windows/arm64", "linux/amd64", "linux/arm64")
+	requireAll(t, release,
+		"needs: [secrets, build-binaries, scan-linux-amd64, scan-linux-arm64]",
+		"needs: [publish, release-evidence]",
+		"contents: write",
+		"provenance.intoto.jsonl",
+		"--sbom=true",
+		"--provenance=mode=max",
+		"attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2",
+		"release-evidence",
+	)
 	if strings.Contains(ci+release, "RequestURI") {
 		t.Fatal("CI must not add a custom HTTP parser fuzz target")
 	}
