@@ -62,6 +62,27 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.26.5'
+          check-latest: true
+      - name: Run native black-box E2E
+        shell: bash
+        run: sudo --preserve-env=PATH bash scripts/verify-e2e.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: failure()
+        with:
+          name: e2e-failure
+          path: out/e2e
+          if-no-files-found: ignore
+          retention-days: 7
+
   security:
     runs-on: ubuntu-latest
     steps:
