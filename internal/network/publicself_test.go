@@ -60,3 +60,36 @@ func TestPublicSelfRefreshSingleflightsConcurrentCallers(t *testing.T) {
 		t.Fatalf("resolver calls = %d, want one", got)
 	}
 }
+
+func TestPublicSelfAcquireRefreshesExpiredSnapshot(t *testing.T) {
+	now := time.Unix(100, 0)
+	var calls atomic.Int32
+	p := NewPublicSelf(nil, LookupFunc(func(context.Context, string) ([]netip.Addr, error) {
+		calls.Add(1)
+		return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+	}), "self.example")
+	p.now = func() time.Time { return now }
+	first := p.Acquire(context.Background())
+	now = now.Add(6 * time.Second)
+	second := p.Acquire(context.Background())
+	if second.Generation <= first.Generation || calls.Load() != 2 {
+		t.Fatalf("first=%d second=%d resolver calls=%d", first.Generation, second.Generation, calls.Load())
+	}
+}
+
+func TestPublicSelfRejectsUnsafeConfiguredAddress(t *testing.T) {
+	p := NewPublicSelf([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil, "")
+	if got := p.Refresh(context.Background()); got.Outcome.String() != "failure" {
+		t.Fatalf("unsafe configured outcome=%s want failure", got.Outcome)
+	}
+}
+
+func TestACMEPublicSelfConfiguredAddressDoesNotSatisfyPositiveDNS(t *testing.T) {
+	p := NewPublicSelfForMode(PublicSelfACME, []netip.Addr{netip.MustParseAddr("1.1.1.1")}, LookupFunc(func(context.Context, string) ([]netip.Addr, error) {
+		return nil, nil
+	}), "proxy.example.com")
+	got := p.Refresh(context.Background())
+	if got.Outcome.String() == "positive" || len(got.Addresses) != 1 || got.Addresses[0] != netip.MustParseAddr("1.1.1.1") {
+		t.Fatalf("snapshot=%#v; configured address must remain deny-only", got)
+	}
+}

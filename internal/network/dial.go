@@ -114,7 +114,15 @@ func freshPublicSelf(snapshot PublicSelfSnapshot) bool {
 }
 
 func freshPublicSelfAt(snapshot PublicSelfSnapshot, now time.Time) bool {
-	return snapshot.Outcome.String() == "positive" && snapshot.ObservedAt.After(now.Add(-5*time.Second)) && !snapshot.ObservedAt.After(now.Add(time.Second))
+	outcome := snapshot.Outcome.String()
+	usable := outcome == "positive" || snapshot.Mode == PublicSelfLoopback && outcome == "success_empty"
+	return usable && snapshot.ObservedAt.After(now.Add(-5*time.Second)) && !snapshot.ObservedAt.After(now.Add(time.Second))
+}
+
+// FreshPublicSelfAt exposes the immutable setup gate without exposing mutable
+// public-self internals to proxy assembly.
+func FreshPublicSelfAt(snapshot PublicSelfSnapshot, now time.Time) bool {
+	return freshPublicSelfAt(snapshot, now)
 }
 
 func (d Dialer) now() time.Time {

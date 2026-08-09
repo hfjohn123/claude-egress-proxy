@@ -4,6 +4,7 @@ package certmgr
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -96,9 +97,11 @@ func (m *Manager) Expiry(now time.Time) time.Duration {
 	return s.serving.notAfter.Sub(now)
 }
 
-func (m *Manager) Start(context.Context) error { return nil }
+func (m *Manager) Start(context.Context) error {
+	return errors.New("certificate manager has no lifecycle owner")
+}
 
 func (m *Manager) ReloadOnce(context.Context) contract.ReloadResult {
-	result, _ := contract.ParseReloadResult("success")
+	result, _ := contract.ParseReloadResult("failure")
 	return result
 }

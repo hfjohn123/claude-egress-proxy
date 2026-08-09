@@ -23,10 +23,13 @@ type Metrics struct {
 	clock                                                             timebase.Clock
 	certificateNotAfter                                               func() (time.Time, bool)
 	state                                                             atomic.Pointer[StateSnapshot]
+	stateProvider                                                     atomic.Pointer[stateProvider]
 	stateMetrics                                                      prometheus.Collector
 	tls, auth, connect, closes, pac, limiter, reload, delivery, bytes *prometheus.CounterVec
 	setup, tunnel                                                     *prometheus.HistogramVec
 }
+
+type stateProvider struct{ load func() StateSnapshot }
 
 func NewMetrics(clock timebase.Clock, cert func() (time.Time, bool)) (*Metrics, error) {
 	if clock == nil || cert == nil {
@@ -131,6 +134,10 @@ func (c *stateCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
 	s := c.metrics.state.Load()
+	if provider := c.metrics.stateProvider.Load(); provider != nil {
+		current := provider.load()
+		s = &current
+	}
 	ch <- prometheus.MustNewConstMetric(c.limiterEntries, prometheus.GaugeValue, float64(s.TLSHandshakeLimiterEntries), "tls_handshake")
 	ch <- prometheus.MustNewConstMetric(c.limiterEntries, prometheus.GaugeValue, float64(s.AuthenticationLimiterEntries), "authentication")
 	ch <- prometheus.MustNewConstMetric(c.limiterEntries, prometheus.GaugeValue, float64(s.PACLimiterEntries), "pac")
@@ -161,6 +168,18 @@ func (m *Metrics) PublishState(s StateSnapshot) {
 		panic(invalidClosed)
 	}
 	m.state.Store(&s)
+}
+
+// SetStateProvider makes each scrape collect the current authoritative state.
+func SetStateProvider(m *Metrics, provider func() StateSnapshot) {
+	if m == nil {
+		panic(ErrInvalidMetrics)
+	}
+	if provider == nil {
+		m.stateProvider.Store(nil)
+		return
+	}
+	m.stateProvider.Store(&stateProvider{load: provider})
 }
 func (m *Metrics) IncTLS(v contract.TLSResult) { m.tls.WithLabelValues(validTLS(v)).Inc() }
 func (m *Metrics) IncAuthentication(v contract.AuthenticationResult) {

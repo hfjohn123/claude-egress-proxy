@@ -9,15 +9,15 @@ import (
 )
 
 func TestExecuteDispatchesSelectedActionWithCanonicalConfig(t *testing.T) {
-	configPath := testConfigPath(t)
 	platform := &recordingPlatform{}
+	selection := Selection{ConfigPath: testConfigPath(t), StateRoot: testStatePath(t)}
 	for _, action := range []Action{Install, Uninstall, Start, Stop} {
 		t.Run(action.String(), func(t *testing.T) {
-			if err := Execute(context.Background(), platform, action, configPath); err != nil {
+			if err := Execute(context.Background(), platform, action, selection); err != nil {
 				t.Fatal(err)
 			}
-			if got := platform.calls[len(platform.calls)-1]; got.action != action || got.configPath != configPath {
-				t.Fatalf("call = %+v, want action %v config %q", got, action, configPath)
+			if got := platform.calls[len(platform.calls)-1]; got.action != action || got.selection != selection {
+				t.Fatalf("call = %+v, want action %v selection %+v", got, action, selection)
 			}
 		})
 	}
@@ -26,7 +26,7 @@ func TestExecuteDispatchesSelectedActionWithCanonicalConfig(t *testing.T) {
 func TestExecuteRejectsNonCanonicalPathBeforePlatformMutation(t *testing.T) {
 	platform := &recordingPlatform{}
 	path := filepath.Dir(testConfigPath(t)) + string(filepath.Separator) + ".." + string(filepath.Separator) + "config.yaml"
-	if err := Execute(context.Background(), platform, Install, path); !errors.Is(err, ErrInvalidConfigPath) {
+	if err := Execute(context.Background(), platform, Install, Selection{ConfigPath: path, StateRoot: testStatePath(t)}); !errors.Is(err, ErrInvalidConfigPath) {
 		t.Fatalf("Execute error = %v, want ErrInvalidConfigPath", err)
 	}
 	if len(platform.calls) != 0 {
@@ -62,15 +62,23 @@ func TestTransactionRollsBackCompletedStepsInReverseOrder(t *testing.T) {
 }
 
 type serviceCall struct {
-	action     Action
-	configPath string
+	action    Action
+	selection Selection
 }
 
 type recordingPlatform struct{ calls []serviceCall }
 
-func (p *recordingPlatform) Apply(_ context.Context, action Action, configPath string) error {
-	p.calls = append(p.calls, serviceCall{action: action, configPath: configPath})
+func (p *recordingPlatform) Apply(_ context.Context, action Action, selection Selection) error {
+	p.calls = append(p.calls, serviceCall{action: action, selection: selection})
 	return nil
+}
+
+func testStatePath(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return `C:\ProgramData\ClaudeEgressProxy`
+	}
+	return "/var/lib/claude-egress-proxy"
 }
 
 func testConfigPath(t *testing.T) string {

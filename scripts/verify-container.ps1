@@ -23,14 +23,14 @@ $report = Join-Path (Resolve-Path $ReportDirectory) 'grype.json'
 Invoke-CheckedNative docker @('version', '--format', '{{.Server.Version}}')
 Invoke-CheckedNative docker @('pull', $image)
 Invoke-CheckedNative docker @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', $image, 'db', 'update')
-$scanArgs = @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '-v', "$archivePath:/image.tar:ro", $image, 'oci-archive:/image.tar', '--fail-on', 'high', '-o', 'json')
+$scanArgs = @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '-v', "${archivePath}:/image.tar:ro", $image, 'oci-archive:/image.tar', '--fail-on', 'high', '-o', 'json')
 $stderrFile = [IO.Path]::GetTempFileName()
 $scanOutput = & docker @scanArgs 2> $stderrFile
 $scanCode = $LASTEXITCODE
 if ($scanCode -ne 0) {
     $detail = Get-Content -Raw $stderrFile
     Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
-    throw "docker exited with $scanCode: $detail"
+    throw "docker exited with ${scanCode}: $detail"
 }
 Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
 $scanOutput | Set-Content -Encoding utf8 $report

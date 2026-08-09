@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
 	"github.com/hfjohn123/claude-egress-proxy/internal/network"
 )
 
@@ -29,7 +30,7 @@ func TestDirectTransportDialsValidatedLiteralWithoutProxy(t *testing.T) {
 	transport, err := NewDirectTransport(DirectTransportConfig{
 		DirectoryURL: "https://ca.example/directory",
 		Resolver: network.LookupFunc(func(context.Context, string) ([]netip.Addr, error) {
-			return []netip.Addr{netip.MustParseAddr("203.0.113.7")}, nil
+			return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
 		}),
 		Dial: func(_ context.Context, networkName, address string, _ netip.Addr) (net.Conn, error) {
 			gotNetwork, gotAddress = networkName, address
@@ -43,6 +44,7 @@ func TestDirectTransportDialsValidatedLiteralWithoutProxy(t *testing.T) {
 			}()
 			return client, nil
 		},
+		PublicSelf: func() network.PublicSelfSnapshot { return positiveSelfSnapshot() },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -52,8 +54,32 @@ func TestDirectTransportDialsValidatedLiteralWithoutProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if gotNetwork != "tcp4" || gotAddress != "203.0.113.7:80" {
+	if gotNetwork != "tcp4" || gotAddress != "8.8.8.8:80" {
 		t.Fatalf("dial = %q %q", gotNetwork, gotAddress)
+	}
+}
+
+func TestDirectTransportRejectsUnsafeDNSAnswerBeforeDial(t *testing.T) {
+	called := false
+	transport, err := NewDirectTransport(DirectTransportConfig{
+		DirectoryURL: "https://ca.example/directory",
+		Resolver: network.LookupFunc(func(context.Context, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+		}),
+		Dial: func(context.Context, string, string, netip.Addr) (net.Conn, error) {
+			called = true
+			return nil, errors.New("unexpected dial")
+		},
+		PublicSelf: func() network.PublicSelfSnapshot { return positiveSelfSnapshot() },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.DialContext(t.Context(), "tcp", "ca.example:443"); err == nil {
+		t.Fatal("unsafe DNS answer accepted")
+	}
+	if called {
+		t.Fatal("dial hook called for unsafe answer")
 	}
 }
 
@@ -82,6 +108,42 @@ func TestDirectTransportRequiresFreshPositivePublicSelfWhenConfigured(t *testing
 	}
 }
 
+func TestDirectTransportSynchronouslyRefreshesStalePublicSelf(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	current := network.PublicSelfSnapshot{Generation: 1, ObservedAt: now.Add(-6 * time.Second)}
+	fresh := positiveSelfSnapshot()
+	fresh.Generation, fresh.ObservedAt = 2, now
+	acquired := false
+	dialError := errors.New("dial reached")
+	transport, err := NewDirectTransport(DirectTransportConfig{
+		DirectoryURL: "https://ca.example/directory", Now: func() time.Time { return now },
+		PublicSelf: func() network.PublicSelfSnapshot { return current },
+		Acquire: func(context.Context) network.PublicSelfSnapshot {
+			acquired = true
+			current = fresh
+			return fresh
+		},
+		Resolver: network.LookupFunc(func(context.Context, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+		}),
+		Dial: func(context.Context, string, string, netip.Addr) (net.Conn, error) { return nil, dialError },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.DialContext(t.Context(), "tcp", "ca.example:443"); !errors.Is(err, dialError) {
+		t.Fatalf("dial error = %v", err)
+	}
+	if !acquired {
+		t.Fatal("stale public-self state was not refreshed")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func positiveSelfSnapshot() network.PublicSelfSnapshot {
+	outcome, _ := contract.ParsePublicSelfOutcome("positive")
+	return network.PublicSelfSnapshot{Generation: 1, ObservedAt: time.Now(), Outcome: outcome, Addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+}

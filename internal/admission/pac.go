@@ -84,3 +84,10 @@ func (l *WorkLease) Release() {
 		}
 	})
 }
+
+func (p *PAC) Entries() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.prefixes.cleanup(p.clock.Now())
+	return len(p.prefixes.entries)
+}

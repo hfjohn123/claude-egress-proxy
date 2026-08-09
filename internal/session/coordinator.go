@@ -31,9 +31,13 @@ const (
 
 type Lease interface{ Release() bool }
 type TerminalEvent struct {
+	HasConnect    bool
+	HasClose      bool
 	ConnectResult contract.ConnectResult
 	CloseResult   contract.CloseResult
+	Duration      time.Duration
 	Bytes         contract.ByteTotals
+	Sensitive     *telemetry.SensitiveMetadata
 }
 type Coordinator struct {
 	mu                sync.Mutex
@@ -100,7 +104,13 @@ func (c *Coordinator) notify(e TerminalEvent) {
 }
 func (c *Coordinator) InstallCredentials(next credential.ValidatedSnapshot) InstallResult {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	terminal := make([]TerminalEvent, 0)
+	defer func() {
+		c.mu.Unlock()
+		for _, event := range terminal {
+			c.notify(event)
+		}
+	}()
 	if next.Generation() < c.highWater {
 		return InstallRejected
 	}
@@ -118,14 +128,16 @@ func (c *Coordinator) InstallCredentials(next credential.ValidatedSnapshot) Inst
 			c.revoked[record.ID] = struct{}{}
 		}
 	}
-	newlyRevoked := make(map[credential.RecordID]struct{})
+	invalidated := make(map[credential.RecordID]struct{})
 	if c.snapshot != nil {
-		for _, record := range next.Records() {
-			if record.State != credential.Revoked {
+		for _, record := range c.snapshot.Records() {
+			prior, wasActive := c.snapshot.AuthHandle(record.ID)
+			if !wasActive {
 				continue
 			}
-			if prior, ok := c.snapshot.AuthHandle(record.ID); ok && prior.RecordID == record.ID {
-				newlyRevoked[record.ID] = struct{}{}
+			current, stillActive := next.AuthHandle(record.ID)
+			if !stillActive || !prior.SameRecord(current) {
+				invalidated[record.ID] = struct{}{}
 			}
 		}
 	}
@@ -133,15 +145,25 @@ func (c *Coordinator) InstallCredentials(next credential.ValidatedSnapshot) Inst
 	c.snapshot = &next
 	c.highWater = next.Generation()
 	c.unavailable = false
+	for h := range c.handoffs {
+		if h.attempt != nil && !h.transferred {
+			if _, ok := invalidated[h.attempt.handle.RecordID]; ok {
+				h.releaseLocked()
+			}
+		}
+	}
 	for r := range c.pending {
-		if _, ok := newlyRevoked[r.handle.RecordID]; ok {
+		if _, ok := invalidated[r.handle.RecordID]; ok {
 			r.releaseLocked(connect("credential_changed"))
 		}
 	}
 	for t := range c.tunnels {
 		if t.handoff != nil && t.handoff.attempt != nil {
-			if _, ok := newlyRevoked[t.handoff.attempt.handle.RecordID]; ok {
-				t.releaseLocked(closeResult("credential_revoked"), contract.ByteTotals{})
+			if _, ok := invalidated[t.handoff.attempt.handle.RecordID]; ok {
+				result := closeResult("credential_revoked")
+				if t.releaseLocked(result, contract.ByteTotals{}) {
+					terminal = append(terminal, tunnelTerminalEvent(t, result, contract.ByteTotals{}))
+				}
 			}
 		}
 	}
@@ -164,7 +186,7 @@ func (c *Coordinator) SetCredentialUnavailable(generation uint64) bool {
 	c.signalLocked()
 	return true
 }
-func (c *Coordinator) Authenticate(header []byte, lease admission.PublicLease, started time.Time) (Attempt, contract.AuthenticationResult, contract.ConnectResult) {
+func (c *Coordinator) Authenticate(header []byte, present bool, prefix admission.Prefix, lease admission.PublicLease, started time.Time) (Attempt, contract.AuthenticationResult, contract.ConnectResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.draining {
@@ -173,15 +195,29 @@ func (c *Coordinator) Authenticate(header []byte, lease admission.PublicLease, s
 	}
 	if c.unavailable || c.snapshot == nil {
 		lease.Release()
-		return nil, authResult("invalid"), connect("credential_store_unavailable")
+		return nil, authResult("store_unavailable"), connect("credential_store_unavailable")
 	}
 	id, outcome := c.verifier.Verify(*c.snapshot, header)
+	if !present {
+		lease.Release()
+		return nil, authResult("challenge"), connect("credential_changed")
+	}
 	handle, ok := c.snapshot.AuthHandle(id)
 	if outcome.String() != "valid" || !ok {
+		if c.auth != nil {
+			decision := c.auth.AdmitInvalid(prefix)
+			if !decision.Allowed() {
+				lease.Release()
+				if decision == admission.DecisionMapFull {
+					return nil, authResult("map_capacity"), connect("credential_changed")
+				}
+				return nil, authResult("throttled"), connect("credential_changed")
+			}
+		}
 		lease.Release()
 		return nil, outcome, connect("credential_changed")
 	}
-	a := &attempt{coordinator: c, lease: lease, handle: handle, started: started, live: true}
+	a := &attempt{coordinator: c, lease: lease, handle: handle, started: started, prefix: prefix, live: true}
 	return a, outcome, connect("established")
 }
 func (c *Coordinator) BeginFixed(lease Lease) (Handoff, bool) {
@@ -203,11 +239,7 @@ func (c *Coordinator) BeginSetup(a Attempt) (Handoff, contract.ConnectResult) {
 		x.releaseLocked(connect("draining"))
 		return nil, connect("draining")
 	}
-	if !x.live || c.unavailable || c.snapshot == nil || x.handle.Generation != c.snapshot.Generation() {
-		x.releaseLocked(connect("credential_changed"))
-		return nil, connect("credential_changed")
-	}
-	if _, stillActive := c.snapshot.AuthHandle(x.handle.RecordID); !stillActive {
+	if !x.live || !c.handleStillActiveLocked(x.handle) {
 		x.releaseLocked(connect("credential_changed"))
 		return nil, connect("credential_changed")
 	}
@@ -227,6 +259,10 @@ func (c *Coordinator) Transfer(h Handoff) (Reservation, contract.ConnectResult) 
 	if c.draining {
 		x.releaseLocked()
 		return nil, connect("draining")
+	}
+	if x.attempt != nil && !c.handleStillActiveLocked(x.attempt.handle) {
+		x.releaseLocked()
+		return nil, connect("credential_changed")
 	}
 	if x.attempt == nil || !x.attached || x.released || x.transferred {
 		return nil, connect("client_disconnected")
@@ -266,7 +302,7 @@ func (c *Coordinator) Commit(v Reservation, origin net.Conn) (Tunnel, contract.C
 		r.releaseLocked(connect("draining"))
 		return nil, connect("draining")
 	}
-	if r.released || r.handoff == nil || r.handoff.released || c.unavailable || c.snapshot == nil || r.handle.Generation != c.snapshot.Generation() {
+	if r.released || r.handoff == nil || r.handoff.released || !c.handleStillActiveLocked(r.handle) {
 		r.releaseLocked(connect("credential_changed"))
 		return nil, connect("credential_changed")
 	}
@@ -276,6 +312,14 @@ func (c *Coordinator) Commit(v Reservation, origin net.Conn) (Tunnel, contract.C
 	c.tunnels[t] = struct{}{}
 	c.signalLocked()
 	return t, connect("established")
+}
+
+func (c *Coordinator) handleStillActiveLocked(handle credential.AuthHandle) bool {
+	if c.unavailable || c.snapshot == nil {
+		return false
+	}
+	current, ok := c.snapshot.AuthHandle(handle.RecordID)
+	return ok && handle.SameRecord(current)
 }
 func (c *Coordinator) SetReadiness(p contract.ReadinessPredicate, ready bool) bool {
 	c.mu.Lock()
@@ -322,6 +366,9 @@ func (c *Coordinator) BeginDrain() DrainResult {
 		return DrainAlready
 	}
 	c.draining = true
+	if predicate, ok := contract.ParseReadinessPredicate("drain"); ok {
+		c.readiness[predicate] = false
+	}
 	for r := range c.pending {
 		r.releaseLocked(connect("draining"))
 	}
@@ -346,17 +393,24 @@ func (c *Coordinator) WaitHijacked(ctx context.Context) bool {
 }
 func (c *Coordinator) ForceCloseHijacked() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for r := range c.pending {
 		r.releaseLocked(connect("draining"))
 	}
 	for h := range c.handoffs {
 		h.releaseLocked()
 	}
+	terminal := make([]TerminalEvent, 0, len(c.tunnels))
+	result := closeResult("shutdown_deadline")
 	for t := range c.tunnels {
-		t.releaseLocked(contract.CloseResult(0), contract.ByteTotals{})
+		if t.releaseLocked(result, contract.ByteTotals{}) {
+			terminal = append(terminal, tunnelTerminalEvent(t, result, contract.ByteTotals{}))
+		}
 	}
 	c.signalLocked()
+	c.mu.Unlock()
+	for _, event := range terminal {
+		c.notify(event)
+	}
 }
 
 var _ = time.Time{}

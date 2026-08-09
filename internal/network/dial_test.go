@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"testing"
 	"time"
@@ -16,6 +17,25 @@ func TestClassifyCandidatesRejectsUnsafeSet(t *testing.T) {
 	if err == nil {
 		t.Fatal("unsafe answer set accepted")
 	}
+}
+
+func TestDialCandidatesAllowsFreshLoopbackPublicSelf(t *testing.T) {
+	snapshot := PublicSelfSnapshot{Generation: 1, ObservedAt: time.Now(), Outcome: publicSelfOutcome("success_empty"), Mode: PublicSelfLoopback}
+	dialed := false
+	d := Dialer{
+		Snapshot: func() PublicSelfSnapshot { return snapshot },
+		Dial: func(context.Context, string, string, netip.Addr) (net.Conn, error) {
+			dialed = true
+			client, peer := net.Pipe()
+			_ = peer.Close()
+			return client, nil
+		},
+	}
+	conn, _, err := d.DialCandidates(context.Background(), "example.com", 443, []netip.Addr{netip.MustParseAddr("8.8.8.8")}, snapshot)
+	if err != nil || !dialed {
+		t.Fatalf("loopback dial err=%v dialed=%v", err, dialed)
+	}
+	_ = conn.Close()
 }
 
 func TestClassifyCandidatesRejectsIPv4MappedIPv6(t *testing.T) {

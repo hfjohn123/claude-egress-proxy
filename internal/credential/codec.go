@@ -20,17 +20,22 @@ type storeRecord struct {
 	Verifier  string `json:"verifier"`
 }
 type storeWire struct {
-	Version    uint8         `json:"version"`
-	Instance   string        `json:"instance"`
-	Generation uint64        `json:"generation"`
-	Records    []storeRecord `json:"records"`
+	Version               uint8         `json:"version"`
+	Instance              string        `json:"instance"`
+	Generation            uint64        `json:"generation"`
+	PredecessorGeneration uint64        `json:"predecessor_generation"`
+	PredecessorDigest     string        `json:"predecessor_digest"`
+	Records               []storeRecord `json:"records"`
 }
 
 func EncodeCanonical(snapshot ValidatedSnapshot) ([]byte, error) {
 	if _, err := NewValidatedSnapshot(snapshot.instance, snapshot.generation, snapshot.records); err != nil {
 		return nil, ErrInvalid
 	}
-	w := storeWire{Version: 1, Instance: hex.EncodeToString(snapshot.instance[:]), Generation: snapshot.generation, Records: make([]storeRecord, len(snapshot.records))}
+	if !snapshot.predecessorSet || snapshot.generation > 0 && snapshot.predecessorGeneration+1 != snapshot.generation {
+		return nil, ErrInvalid
+	}
+	w := storeWire{Version: 1, Instance: hex.EncodeToString(snapshot.instance[:]), Generation: snapshot.generation, PredecessorGeneration: snapshot.predecessorGeneration, PredecessorDigest: hex.EncodeToString(snapshot.predecessorDigest[:]), Records: make([]storeRecord, len(snapshot.records))}
 	for i, r := range snapshot.records {
 		w.Records[i] = storeRecord{r.ID.String(), r.Device, r.CreatedAt.UTC().Format(time.RFC3339Nano), r.State.String(), base64.RawStdEncoding.EncodeToString(r.Verifier[:])}
 	}
@@ -54,9 +59,15 @@ func DecodeCanonical(raw []byte, instance [16]byte) (ValidatedSnapshot, error) {
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return ValidatedSnapshot{}, ErrInvalid
 	}
-	if w.Version != 1 || w.Instance != hex.EncodeToString(instance[:]) {
+	if w.Version != 1 || w.Instance != hex.EncodeToString(instance[:]) || len(w.PredecessorDigest) != 64 || w.Generation > 0 && w.PredecessorGeneration+1 != w.Generation {
 		return ValidatedSnapshot{}, ErrInvalid
 	}
+	predecessorDigestBytes, err := hex.DecodeString(w.PredecessorDigest)
+	if err != nil || hex.EncodeToString(predecessorDigestBytes) != w.PredecessorDigest {
+		return ValidatedSnapshot{}, ErrInvalid
+	}
+	var predecessorDigest [sha256.Size]byte
+	copy(predecessorDigest[:], predecessorDigestBytes)
 	records := make([]Record, len(w.Records))
 	for i, r := range w.Records {
 		id, err := ParseRecordID(r.ID)
@@ -89,6 +100,10 @@ func DecodeCanonical(raw []byte, instance [16]byte) (ValidatedSnapshot, error) {
 	s, err := NewValidatedSnapshot(instance, w.Generation, records)
 	if err != nil {
 		return ValidatedSnapshot{}, ErrInvalid
+	}
+	s = s.withPredecessor(w.PredecessorGeneration, predecessorDigest)
+	if w.Generation == 0 {
+		s.predecessorGeneration, s.predecessorDigest, s.predecessorSet = 0, predecessorDigest, true
 	}
 	canonical, err := EncodeCanonical(s)
 	if err != nil || !bytes.Equal(raw, canonical) {

@@ -8,8 +8,10 @@ import (
 	"io"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
+	checkpkg "github.com/hfjohn123/claude-egress-proxy/internal/check"
 	"github.com/hfjohn123/claude-egress-proxy/internal/cli"
 	"github.com/hfjohn123/claude-egress-proxy/internal/config"
 	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
@@ -36,6 +38,7 @@ type InitDependencies struct {
 	Entropy  io.Reader
 	Defaults func() (config.DefaultPaths, error)
 	Security func() (config.SecurityPolicies, error)
+	Prepare  func(context.Context) (service.Undo, error)
 	Checkout securefs.Identity
 }
 
@@ -47,6 +50,19 @@ func NewInitHandler(deps InitDependencies) Handler {
 		defaults, err := deps.Defaults()
 		if err != nil {
 			return initFailure(contract.D010)
+		}
+		var undo service.Undo
+		prepared := false
+		if deps.Prepare != nil {
+			undo, err = deps.Prepare(ctx)
+			if err != nil {
+				return initFailure(contract.D010)
+			}
+			defer func() {
+				if !prepared && undo != nil {
+					_ = undo(context.WithoutCancel(ctx))
+				}
+			}()
 		}
 		policies, err := deps.Security()
 		if err != nil {
@@ -128,6 +144,7 @@ func NewInitHandler(deps InitDependencies) Handler {
 		if !boundary.NamespacePublished || !boundary.TargetDurable {
 			return initFailure(contract.D010)
 		}
+		prepared = true
 		return Result{ExitCode: 0}
 	}
 }
@@ -228,24 +245,56 @@ func initFailure(code contract.DiagnosticCode) Result {
 func ProductionDependencies() Dependencies {
 	checkout, err := config.CheckoutIdentity()
 	if err != nil {
-		return Dependencies{Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler(), Service: NewServiceHandler()}
+		return Dependencies{Serve: NewServeHandler(), Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, Credential: NewCredentialHandler(), PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler(), CheckHealth: NewHealthHandler(), CheckNetwork: NewNetworkHandler(), Service: NewServiceHandler()}
 	}
-	return Dependencies{Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Checkout: checkout}), AdminToken: NewAdminTokenHandler(), PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler(), Service: NewServiceHandler()}
+	return Dependencies{Serve: NewServeHandler(), Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Prepare: func(ctx context.Context) (service.Undo, error) {
+		return service.Prepare(ctx, service.NewPlatform(), service.Install)
+	}, Checkout: checkout}), Credential: NewCredentialHandler(), AdminToken: NewAdminTokenHandler(), PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler(), CheckHealth: NewHealthHandler(), CheckNetwork: NewNetworkHandler(), Service: NewServiceHandler()}
+}
+
+func NewHealthHandler() Handler { return newHealthHandler(checkpkg.Health) }
+
+func newHealthHandler(probe func(context.Context, string) error) Handler {
+	return func(ctx context.Context, invocation cli.Invocation) Result {
+		if probe == nil {
+			return Result{ExitCode: 1, Stderr: []byte("health probe failed\n")}
+		}
+		err := probe(ctx, invocation.HealthAddress)
+		if errors.Is(err, checkpkg.ErrInvalidHealthAddress) {
+			return Result{ExitCode: 2, Stderr: cli.UsageCheckHealth}
+		}
+		if err != nil {
+			return Result{ExitCode: 1, Stderr: []byte("health probe failed\n")}
+		}
+		return Result{}
+	}
 }
 
 type serviceDependencies struct {
 	defaults func() (config.DefaultPaths, error)
+	load     func(string, config.ValidationMode) (serviceLoaded, error)
 	platform func() service.Platform
+}
+
+type serviceLoaded interface {
+	StateRootPath() string
+	Close() error
 }
 
 // NewServiceHandler constructs the privileged service command adapter.
 func NewServiceHandler() Handler {
-	return newServiceHandler(serviceDependencies{defaults: config.PlatformDefaults, platform: service.NewPlatform})
+	return newServiceHandler(serviceDependencies{
+		defaults: config.PlatformDefaults,
+		load: func(path string, mode config.ValidationMode) (serviceLoaded, error) {
+			return config.Load(path, mode)
+		},
+		platform: service.NewPlatform,
+	})
 }
 
 func newServiceHandler(deps serviceDependencies) Handler {
 	return func(ctx context.Context, invocation cli.Invocation) Result {
-		if deps.defaults == nil || deps.platform == nil {
+		if deps.defaults == nil || deps.load == nil || deps.platform == nil {
 			return initFailure(contract.D010)
 		}
 		path := invocation.ConfigPath
@@ -269,12 +318,30 @@ func newServiceHandler(deps serviceDependencies) Handler {
 		default:
 			return initFailure(contract.D003)
 		}
-		if err := service.Execute(ctx, deps.platform(), action, path); err != nil {
+		platform := deps.platform()
+		undo, err := service.Prepare(ctx, platform, action)
+		if err != nil {
+			return initFailure(contract.D010)
+		}
+		committed := false
+		defer func() {
+			if !committed && undo != nil {
+				_ = undo(context.WithoutCancel(ctx))
+			}
+		}()
+		loaded, err := deps.load(path, config.ValidateOperational)
+		if err != nil {
+			return initFailure(configCode(err))
+		}
+		defer loaded.Close()
+		selection := service.Selection{ConfigPath: path, StateRoot: loaded.StateRootPath()}
+		if err := service.Execute(ctx, platform, action, selection); err != nil {
 			if errors.Is(err, service.ErrUnsupported) {
 				return initFailure(contract.D010)
 			}
 			return initFailure(contract.D001)
 		}
+		committed = true
 		return Result{}
 	}
 }
@@ -289,7 +356,7 @@ func NewPACHandler() Handler {
 
 type checkConfigDependencies struct {
 	defaults func() (config.DefaultPaths, error)
-	load     func(string) (pacLoaded, error)
+	load     func(string, config.ValidationMode) (pacLoaded, error)
 }
 
 // NewCheckConfigHandler validates the selected immutable configuration and
@@ -297,7 +364,7 @@ type checkConfigDependencies struct {
 func NewCheckConfigHandler() Handler {
 	return newCheckConfigHandler(checkConfigDependencies{
 		defaults: config.PlatformDefaults,
-		load:     func(path string) (pacLoaded, error) { return config.Load(path, config.ValidatePure) },
+		load:     func(path string, mode config.ValidationMode) (pacLoaded, error) { return config.Load(path, mode) },
 	})
 }
 
@@ -311,13 +378,42 @@ func newCheckConfigHandler(deps checkConfigDependencies) Handler {
 			}
 			path = defaults.Config
 		}
-		loaded, err := deps.load(path)
+		loaded, err := deps.load(path, config.ValidateOperational)
 		if err != nil {
 			return initFailure(configCode(err))
 		}
 		defer loaded.Close()
-		return Result{}
+		return Result{Stdout: checkConfigDiagnostics(loaded.Config())}
 	}
+}
+
+func checkConfigDiagnostics(configuration config.Config) []byte {
+	var blocks []string
+	if configuration.TLS().Mode() == config.TLSInsecureLoopback {
+		blocks = append(blocks, "INSECURE LOOPBACK TEST MODE: Basic proxy credentials are sent in plaintext on\nthis host. Use only a fresh disposable local-test credential; never reuse a\ncredential from a TLS deployment.")
+	}
+	if configuration.Destination().DangerousCustomSuffixes() {
+		suffixes := configuration.Destination().Suffixes()
+		for i, suffix := range suffixes {
+			normalized, err := policy.NormalizeHostname(suffix)
+			if err != nil {
+				return nil
+			}
+			suffixes[i] = normalized
+		}
+		sort.Strings(suffixes)
+		var warning strings.Builder
+		warning.WriteString("WARNING: dangerous_custom_suffixes is enabled.\nEach listed suffix permits CONNECT to the suffix itself and every subdomain:")
+		for _, suffix := range suffixes {
+			warning.WriteString("\n- ")
+			warning.WriteString(suffix)
+		}
+		blocks = append(blocks, warning.String())
+	}
+	if len(blocks) == 0 {
+		return nil
+	}
+	return []byte(strings.Join(blocks, "\n\n") + "\n")
 }
 
 type pacLoaded interface {

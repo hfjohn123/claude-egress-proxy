@@ -13,6 +13,7 @@ func TestCanonicalEncodeDecodeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s = s.withPredecessor(52, [32]byte{7})
 	raw, err := EncodeCanonical(s)
 	if err != nil {
 		t.Fatal(err)

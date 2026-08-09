@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/hfjohn123/claude-egress-proxy/internal/config"
 	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
 	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
+	"github.com/hfjohn123/claude-egress-proxy/internal/service"
 )
 
 type countingEntropy struct{ reads int }
@@ -80,6 +82,59 @@ func TestInitCreatesConfigLastAndNeverOverwrites(t *testing.T) {
 	}
 	if string(after) != string(bytesOnDisk) {
 		t.Fatal("init overwrote existing config")
+	}
+}
+
+func TestInitPreparesIdentityBeforeSecurityAndKeepsItOnSuccess(t *testing.T) {
+	base := t.TempDir()
+	configPath := filepath.Join(base, "config", "config.yaml")
+	statePath := filepath.Join(base, "state")
+	deps := testInitDependencies(configPath, statePath, bytes.NewReader(make([]byte, 16)))
+	prepared := false
+	undone := 0
+	security := deps.Security
+	deps.Prepare = func(context.Context) (service.Undo, error) {
+		prepared = true
+		return func(context.Context) error { undone++; return nil }, nil
+	}
+	deps.Security = func() (config.SecurityPolicies, error) {
+		if !prepared {
+			t.Fatal("security policies evaluated before identity preparation")
+		}
+		return security()
+	}
+
+	result := NewInitHandler(deps)(context.Background(), cli.Invocation{Command: cli.Init})
+	if result.ExitCode != 0 {
+		t.Fatalf("init result = %+v", result)
+	}
+	if undone != 0 {
+		t.Fatalf("successful preparation rolled back %d times", undone)
+	}
+}
+
+func TestInitRollsBackPreparedIdentityWhenSecurityFails(t *testing.T) {
+	deps := InitDependencies{
+		Entropy:  bytes.NewReader(make([]byte, 16)),
+		Defaults: func() (config.DefaultPaths, error) { return config.DefaultPaths{}, nil },
+		Prepare: func(context.Context) (service.Undo, error) {
+			return func(context.Context) error { return nil }, nil
+		},
+	}
+	undone := 0
+	deps.Prepare = func(context.Context) (service.Undo, error) {
+		return func(context.Context) error { undone++; return nil }, nil
+	}
+	deps.Security = func() (config.SecurityPolicies, error) {
+		return config.SecurityPolicies{}, errors.New("security unavailable")
+	}
+
+	result := NewInitHandler(deps)(context.Background(), cli.Invocation{Command: cli.Init})
+	if result.ExitCode != 1 || string(result.Stderr) != string(contract.Fatal(contract.D010)) {
+		t.Fatalf("init result = %+v", result)
+	}
+	if undone != 1 {
+		t.Fatalf("rollback count = %d, want 1", undone)
 	}
 }
 
@@ -268,7 +323,16 @@ func TestProductionDependenciesWiresAvailableCommands(t *testing.T) {
 	if d.Service == nil {
 		t.Fatal("production service is nil")
 	}
-	if d.Serve != nil || d.Credential != nil || d.CheckHealth != nil || d.CheckNetwork != nil {
-		t.Fatal("later handlers became live")
+	if d.CheckHealth == nil {
+		t.Fatal("production check-health handler is nil")
+	}
+	if d.Credential == nil {
+		t.Fatal("production credential handler is nil")
+	}
+	if d.Serve == nil {
+		t.Fatal("production serve handler is nil")
+	}
+	if d.CheckNetwork == nil {
+		t.Fatal("production check-network handler is nil")
 	}
 }

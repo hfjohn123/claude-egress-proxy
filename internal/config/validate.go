@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,9 +11,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hfjohn123/claude-egress-proxy/internal/admintoken"
+	"github.com/hfjohn123/claude-egress-proxy/internal/certmgr"
 	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
+	"github.com/hfjohn123/claude-egress-proxy/internal/credential"
+	"github.com/hfjohn123/claude-egress-proxy/internal/network"
 	"github.com/hfjohn123/claude-egress-proxy/internal/policy"
 	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
+	"github.com/hfjohn123/claude-egress-proxy/internal/telemetry"
 )
 
 var (
@@ -40,6 +46,7 @@ type SecurityPolicies struct {
 	ConfigContainer, ConfigDirectory securefs.RootPolicy
 	ConfigFile                       securefs.FilePolicy
 	StateContainer, StateDirectory   securefs.RootPolicy
+	StateFile                        securefs.FilePolicy
 }
 type Loader struct {
 	CheckoutIdentity securefs.Identity
@@ -115,10 +122,7 @@ func (b *borrowedRoot) ReadFile(n string, p securefs.FilePolicy) ([]byte, secure
 }
 
 func Load(path string, mode ValidationMode) (*Loaded, error) {
-	if mode == ValidateOperational || mode == ValidatePreServe {
-		return nil, typed(ErrValidationUnavailable, contract.D010)
-	}
-	if mode != ValidatePure {
+	if mode != ValidatePure && mode != ValidateOperational && mode != ValidatePreServe {
 		return nil, typed(ErrValue, contract.D003)
 	}
 	policies, err := PlatformSecurityPolicies()
@@ -134,9 +138,7 @@ func Load(path string, mode ValidationMode) (*Loaded, error) {
 
 func (loader Loader) Load(path string, mode ValidationMode) (*Loaded, error) {
 	switch mode {
-	case ValidateOperational, ValidatePreServe:
-		return nil, typed(ErrValidationUnavailable, contract.D010)
-	case ValidatePure:
+	case ValidatePure, ValidateOperational, ValidatePreServe:
 	default:
 		return nil, typed(ErrValue, contract.D003)
 	}
@@ -177,7 +179,74 @@ func (loader Loader) Load(path string, mode ValidationMode) (*Loaded, error) {
 		}
 		return nil, typed(ErrPathSecurity, contract.D004)
 	}
-	return &Loaded{config: cfg, configPath: path, configIdentity: state.Identity, statePath: cfg.StateRootPath(), stateIdentity: stateRoot.Identity(), configParent: parent, stateRoot: stateRoot, mode: ValidatePure}, nil
+	loaded := &Loaded{config: cfg, configPath: path, configIdentity: state.Identity, statePath: cfg.StateRootPath(), stateIdentity: stateRoot.Identity(), configParent: parent, stateRoot: stateRoot, mode: mode}
+	if mode != ValidatePure {
+		if err := validateOperational(loaded, loader.Policies); err != nil {
+			_ = loaded.Close()
+			return nil, err
+		}
+	}
+	return loaded, nil
+}
+
+func validateOperational(loaded *Loaded, policies SecurityPolicies) error {
+	cfg := loaded.Config()
+	identityPolicy := securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, Access: securefs.IdentityOnlyPermissions(), MaxBytes: int64(contract.V1().StoreBytes)}
+	storeState, storeErr := loaded.StateRoot().Inspect("credentials.json", identityPolicy)
+	lockState, lockErr := loaded.StateRoot().Inspect("credentials.lock", identityPolicy)
+	if storeErr != nil || lockErr != nil {
+		return typed(ErrValue, contract.D005)
+	}
+	artifactPolicy := policies.StateFile
+	if securefs.PermissionsEqual(artifactPolicy.Access, securefs.PermissionPolicy{}) {
+		artifactPolicy.Access = securefs.IdentityOnlyPermissions()
+	}
+	artifactPolicy.Presence, artifactPolicy.Kind, artifactPolicy.MaxBytes = securefs.Optional, securefs.RegularFile, int64(contract.V1().StoreBytes)
+	if storeState.Present || lockState.Present {
+		inspector, err := credential.OpenInspector(loaded.StateRoot(), cfg.InstanceID(), artifactPolicy)
+		if err != nil {
+			return typed(ErrValue, contract.D005)
+		}
+		inspection, err := inspector.Inspect(context.Background(), credential.ValidateOnly)
+		if err != nil || inspection.State != credential.StoreCoherent && inspection.State != credential.StoreSuccessor {
+			return typed(ErrValue, contract.D005)
+		}
+	}
+	if _, err := admintoken.LoadVerifier(context.Background(), loaded.StateRoot(), cfg.InstanceID(), artifactPolicy, cfg.Metrics().Enabled()); err != nil {
+		return typed(ErrValue, contract.D006)
+	}
+	if cfg.TLS().Mode() == TLSSupplied {
+		filePolicy := artifactPolicy
+		filePolicy.Presence = securefs.Required
+		filePolicy.MaxBytes = 1 << 20
+		if _, err := certmgr.NewSupplied(certmgr.SuppliedConfig{Hostname: cfg.TLS().Hostname(), CertificateFile: cfg.TLS().CertificateFile(), PrivateKeyFile: cfg.TLS().PrivateKeyFile(), RootPolicy: securefs.RootPolicy{Access: securefs.IdentityOnlyPermissions()}, FilePolicy: filePolicy}); err != nil {
+			return typed(ErrValue, contract.D007)
+		}
+	}
+	if cfg.TLS().Mode() == TLSACME {
+		store := certmgr.ACMEStore{Root: loaded.StateRoot(), Name: "acme.json", Policy: artifactPolicy}
+		if _, err := store.Load(); err != nil && !errors.Is(err, certmgr.ErrACMEStateAbsent) {
+			return typed(ErrValue, contract.D007)
+		}
+	}
+	if source, ok := cfg.OutboundSourceIPv4(); ok {
+		if err := (&network.SourceMonitor{Configured: source}).Recheck(context.Background()); err != nil {
+			return typed(ErrValue, contract.D011)
+		}
+	}
+	if cfg.Logging().Sink() == LogSinkFile {
+		root, err := securefs.OpenRoot(filepath.Dir(cfg.Logging().FilePath()), policies.StateDirectory)
+		if err != nil {
+			return typed(ErrValue, contract.D008)
+		}
+		defer root.Close()
+		filePolicy := policies.StateFile
+		filePolicy.Presence, filePolicy.Kind, filePolicy.MaxBytes = securefs.Optional, securefs.RegularFile, 10_485_760
+		if err := telemetry.ValidateFileSink(context.Background(), root, filepath.Base(cfg.Logging().FilePath()), filePolicy, telemetry.CheckOnly); err != nil && !errors.Is(err, telemetry.ErrRepairRequired) {
+			return typed(ErrValue, contract.D008)
+		}
+	}
+	return nil
 }
 
 func mapConfigRead(err error) error {
@@ -284,7 +353,7 @@ func validateRaw(r rawConfig) (Config, error) {
 	}
 	switch c.tls.mode {
 	case TLSACME:
-		if r.TLS.Hostname == nil || !validHostname(c.tls.hostname) || r.TLS.CertificateFile != nil || r.TLS.PrivateKeyFile != nil || port != 443 {
+		if r.TLS.Hostname == nil || !validHostname(c.tls.hostname) || r.TLS.CertificateFile != nil || r.TLS.PrivateKeyFile != nil {
 			return bad()
 		}
 	case TLSSupplied:

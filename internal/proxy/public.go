@@ -6,16 +6,24 @@ import (
 	"sync"
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/admission"
+	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
+	"github.com/hfjohn123/claude-egress-proxy/internal/telemetry"
 )
 
 // NewPublicListener acquires public admission before any TLS or HTTP bytes are read.
 func NewPublicListener(listener net.Listener, control *admission.Public) net.Listener {
-	return &publicListener{Listener: listener, control: control}
+	return NewInstrumentedPublicListener(listener, control, nil, false)
+}
+
+func NewInstrumentedPublicListener(listener net.Listener, control *admission.Public, metrics *telemetry.Metrics, tlsEnabled bool) net.Listener {
+	return &publicListener{Listener: listener, control: control, metrics: metrics, tlsEnabled: tlsEnabled}
 }
 
 type publicListener struct {
 	net.Listener
-	control *admission.Public
+	control    *admission.Public
+	metrics    *telemetry.Metrics
+	tlsEnabled bool
 }
 
 func (l *publicListener) Accept() (net.Conn, error) {
@@ -34,11 +42,33 @@ func (l *publicListener) Accept() (net.Conn, error) {
 			continue
 		}
 		lease, decision := l.control.Acquire(admission.Aggregate(address))
+		l.recordAdmission(decision)
 		if !decision.Allowed() {
 			_ = conn.Close()
 			continue
 		}
 		return &publicConn{Conn: conn, lease: lease}, nil
+	}
+}
+
+func (l *publicListener) recordAdmission(decision admission.Decision) {
+	if l.metrics == nil {
+		return
+	}
+	limiter, _ := contract.ParseLimiter("tls_handshake")
+	eventName := "allowed"
+	switch decision {
+	case admission.DecisionAllowed:
+	case admission.DecisionSaturationOverflow:
+		eventName = "saturation_overflow"
+	default:
+		eventName = "throttled"
+	}
+	event, _ := contract.ParseLimiterEvent(eventName)
+	l.metrics.IncLimiter(limiter, event)
+	if l.tlsEnabled && !decision.Allowed() {
+		result, _ := contract.ParseTLSResult("rate_limited")
+		l.metrics.IncTLS(result)
 	}
 }
 

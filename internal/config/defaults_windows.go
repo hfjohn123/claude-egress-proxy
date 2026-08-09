@@ -14,7 +14,7 @@ var programDataKnownFolder = func() (string, error) {
 	return windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
 }
 
-var lookupServiceSID = windows.LookupSID
+const claudeEgressProxyServiceSID = "S-1-5-80-3010338941-74018544-2626946558-146239748-1806295859"
 
 func PlatformDefaults() (DefaultPaths, error) {
 	base, err := programDataKnownFolder()
@@ -26,12 +26,12 @@ func PlatformDefaults() (DefaultPaths, error) {
 }
 
 func PlatformSecurityPolicies() (SecurityPolicies, error) {
-	service, _, _, err := lookupServiceSID("", `NT SERVICE\ClaudeEgressProxy`)
+	service, err := windows.StringToSid(claudeEgressProxyServiceSID)
 	if err != nil || service == nil || !service.IsValid() {
 		return SecurityPolicies{}, ErrPlatform
 	}
 	admin := "S-1-5-32-544"
-	serviceSID := service.String()
+	serviceSID := claudeEgressProxyServiceSID
 	const fileAllAccess = uint32(windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff)
 	directoryMask := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.FILE_READ_ATTRIBUTES | windows.FILE_WRITE_ATTRIBUTES | windows.FILE_TRAVERSE | windows.READ_CONTROL | windows.SYNCHRONIZE)
 	dir, err := securefs.WindowsExactPermissions([]securefs.WindowsGrant{{SID: admin, Access: fileAllAccess}, {SID: serviceSID, Access: directoryMask}})
@@ -42,5 +42,9 @@ func PlatformSecurityPolicies() (SecurityPolicies, error) {
 	if err != nil {
 		return SecurityPolicies{}, ErrPlatform
 	}
-	return SecurityPolicies{ConfigContainer: securefs.RootPolicy{Access: securefs.IdentityOnlyPermissions()}, ConfigDirectory: securefs.RootPolicy{Access: dir}, ConfigFile: securefs.FilePolicy{Presence: securefs.Required, Kind: securefs.RegularFile, Access: configFile, MaxBytes: int64(contract.V1().ConfigBytes)}, StateContainer: securefs.RootPolicy{Access: securefs.IdentityOnlyPermissions()}, StateDirectory: securefs.RootPolicy{Access: dir}}, nil
+	stateFile, err := securefs.WindowsExactPermissions([]securefs.WindowsGrant{{SID: admin, Access: fileAllAccess}, {SID: serviceSID, Access: fileAllAccess}})
+	if err != nil {
+		return SecurityPolicies{}, ErrPlatform
+	}
+	return SecurityPolicies{ConfigContainer: securefs.RootPolicy{Access: securefs.IdentityOnlyPermissions()}, ConfigDirectory: securefs.RootPolicy{Access: dir}, ConfigFile: securefs.FilePolicy{Presence: securefs.Required, Kind: securefs.RegularFile, Access: configFile, MaxBytes: int64(contract.V1().ConfigBytes)}, StateContainer: securefs.RootPolicy{Access: securefs.IdentityOnlyPermissions()}, StateDirectory: securefs.RootPolicy{Access: dir}, StateFile: securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, Access: stateFile, MaxBytes: int64(contract.V1().StoreBytes)}}, nil
 }

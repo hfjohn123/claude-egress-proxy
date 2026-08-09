@@ -26,7 +26,7 @@ func (r *reservation) Release(v contract.ConnectResult) bool {
 	ok := r.releaseLocked(v)
 	r.coordinator.mu.Unlock()
 	if ok {
-		r.coordinator.notify(TerminalEvent{ConnectResult: v})
+		r.coordinator.notify(TerminalEvent{HasConnect: true, ConnectResult: v})
 	}
 	return ok
 }

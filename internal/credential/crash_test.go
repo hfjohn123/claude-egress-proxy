@@ -45,6 +45,7 @@ func TestCrashAfterSuccessorPublicationReconcilesExactlyOneStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	successor = successor.withPredecessor(1, sha256.Sum256(predecessorBytes))
 	successorBytes, err := EncodeCanonical(successor)
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +72,29 @@ func TestCrashAfterSuccessorPublicationReconcilesExactlyOneStep(t *testing.T) {
 	cp, ok := selectCheckpoint(final, instance)
 	if !ok || cp.slot != 1 || cp.generation != 2 || cp.digest != sha256.Sum256(successorBytes) {
 		t.Fatalf("checkpoint = %#v, %v", cp, ok)
+	}
+}
+
+func TestSuccessorWithWrongPredecessorDigestIsConflict(t *testing.T) {
+	var instance [16]byte
+	predecessor, _ := NewValidatedSnapshot(instance, 1, nil)
+	predecessorBytes, _ := EncodeCanonical(predecessor)
+	checkpointDigest := sha256.Sum256(predecessorBytes)
+	successor, _ := NewValidatedSnapshot(instance, 2, nil)
+	successor = successor.withPredecessor(1, sha256.Sum256([]byte("divergent predecessor")))
+	successorBytes, err := EncodeCanonical(successor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot, _ := encodeCheckpoint(0, instance, 1, checkpointDigest)
+	journal := make([]byte, checkpointJournalBytes)
+	copy(journal, slot[:])
+	state, err := inspectFiles(fakeStoreReader{files: map[string][]byte{storeName: successorBytes, lockName: journal}}, instance, securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.State != StoreConflict {
+		t.Fatalf("state=%v want conflict", state.State)
 	}
 }
 

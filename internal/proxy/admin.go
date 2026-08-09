@@ -41,22 +41,18 @@ type AdminConfig struct {
 // emits no application telemetry for administrative requests.
 func NewAdminHandler(cfg AdminConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			w.Header().Set("Allow", "GET")
-			writeAdmin(w, r, cfg.Coordinator, http.StatusMethodNotAllowed, "method not allowed\n", "text/plain; charset=utf-8")
+		req, routeDecision := wire.AdaptRequest(r)
+		if routeDecision == wire.DecisionHTTPVersionNotSupported {
+			writeAdmin(w, r, cfg.Coordinator, http.StatusHTTPVersionNotSupported, "http version not supported\n", "text/plain; charset=utf-8")
 			return
 		}
-		switch r.URL.Path {
+		if routeDecision != wire.DecisionAllow || req.Target != wire.TargetOrigin {
+			writeAdmin(w, r, cfg.Coordinator, http.StatusBadRequest, "bad request\n", "text/plain; charset=utf-8")
+			return
+		}
+		switch req.RequestURI {
 		case "/healthz":
-			writeAdmin(w, r, cfg.Coordinator, http.StatusOK, "ok\n", "text/plain; charset=utf-8")
-			return
 		case "/readyz":
-			if cfg.Readiness != nil && cfg.Readiness.Ready() {
-				writeAdmin(w, r, cfg.Coordinator, http.StatusOK, "ready\n", "text/plain; charset=utf-8")
-			} else {
-				writeAdmin(w, r, cfg.Coordinator, http.StatusServiceUnavailable, "not ready\n", "text/plain; charset=utf-8")
-			}
-			return
 		case "/metrics":
 			if !cfg.MetricsEnabled {
 				writeAdmin(w, r, cfg.Coordinator, http.StatusNotFound, "not found\n", "text/plain; charset=utf-8")
@@ -64,6 +60,23 @@ func NewAdminHandler(cfg AdminConfig) http.Handler {
 			}
 		default:
 			writeAdmin(w, r, cfg.Coordinator, http.StatusNotFound, "not found\n", "text/plain; charset=utf-8")
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			writeAdmin(w, r, cfg.Coordinator, http.StatusMethodNotAllowed, "method not allowed\n", "text/plain; charset=utf-8")
+			return
+		}
+		if req.RequestURI == "/healthz" {
+			writeAdmin(w, r, cfg.Coordinator, http.StatusOK, "ok\n", "text/plain; charset=utf-8")
+			return
+		}
+		if req.RequestURI == "/readyz" {
+			if cfg.Readiness != nil && cfg.Readiness.Ready() {
+				writeAdmin(w, r, cfg.Coordinator, http.StatusOK, "ready\n", "text/plain; charset=utf-8")
+			} else {
+				writeAdmin(w, r, cfg.Coordinator, http.StatusServiceUnavailable, "not ready\n", "text/plain; charset=utf-8")
+			}
 			return
 		}
 
@@ -135,6 +148,10 @@ func adminFrame(status int, body string) wire.Frame {
 			return wire.FrameNotReady
 		}
 		return wire.FrameServiceUnavailable
+	case http.StatusBadRequest:
+		return wire.FrameBadRequest
+	case http.StatusHTTPVersionNotSupported:
+		return wire.FrameHTTPVersionNotSupported
 	default:
 		return wire.FrameInternalError
 	}

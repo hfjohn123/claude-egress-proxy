@@ -2,6 +2,7 @@ package certmgr
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 
 const maxSuppliedFileBytes = 1 << 20
 
+var errUnchangedInvalidCertificate = errors.New("unchanged invalid certificate")
+
 // SuppliedConfig identifies one certificate/key pair. Paths are deliberately
 // never included in returned errors.
 type SuppliedConfig struct {
@@ -24,6 +27,7 @@ type SuppliedConfig struct {
 	Clock                                     timebase.Clock
 	RootPolicy                                securefs.RootPolicy
 	FilePolicy                                securefs.FilePolicy
+	Observe                                   func(contract.ReloadResult)
 }
 
 // Supplied validates and polls a supplied PEM pair without replacing good state on failure.
@@ -36,6 +40,13 @@ type Supplied struct {
 	mu                              sync.Mutex
 	failed                          bool
 	started                         atomic.Bool
+	observe                         func(contract.ReloadResult)
+	digest                          [sha256.Size]byte
+	hasDigest                       bool
+	digestInvalid                   bool
+	done                            chan struct{}
+	doneOnce                        sync.Once
+	stopped                         atomic.Bool
 }
 
 func NewSupplied(config SuppliedConfig) (*Supplied, error) {
@@ -63,23 +74,40 @@ func NewSupplied(config SuppliedConfig) (*Supplied, error) {
 	if filePolicy.MaxBytes == 0 {
 		filePolicy.MaxBytes = maxSuppliedFileBytes
 	}
-	m := &Supplied{Manager: New(config.Hostname, config.Now), certificateFile: config.CertificateFile, privateKeyFile: config.PrivateKeyFile, clock: clock, rootPolicy: rootPolicy, filePolicy: filePolicy}
-	if err := m.load(); err != nil {
+	m := &Supplied{Manager: New(config.Hostname, config.Now), certificateFile: config.CertificateFile, privateKeyFile: config.PrivateKeyFile, clock: clock, rootPolicy: rootPolicy, filePolicy: filePolicy, observe: config.Observe, done: make(chan struct{})}
+	if _, err := m.load(); err != nil {
 		return nil, err
 	}
 	return m, nil
 }
 
-func (m *Supplied) load() error {
+func (m *Supplied) load() (bool, error) {
 	certPEM, keyPEM, err := readSuppliedPair(m.certificateFile, m.privateKeyFile, m.rootPolicy, m.filePolicy)
 	if err != nil {
-		return errNoCertificate
+		return false, errNoCertificate
 	}
+	hash := sha256.New()
+	_, _ = hash.Write(certPEM)
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write(keyPEM)
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	if m.hasDigest && digest == m.digest {
+		if m.digestInvalid {
+			return false, errUnchangedInvalidCertificate
+		}
+		return false, nil
+	}
+	m.digest, m.hasDigest, m.digestInvalid = digest, true, true
 	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return errNoCertificate
+		return false, errNoCertificate
 	}
-	return m.InstallServing(certificate)
+	if err := m.InstallServing(certificate); err != nil {
+		return false, err
+	}
+	m.digestInvalid = false
+	return true, nil
 }
 
 func readSuppliedPair(certPath, keyPath string, rootPolicy securefs.RootPolicy, filePolicy securefs.FilePolicy) ([]byte, []byte, error) {
@@ -106,10 +134,19 @@ func (m *Supplied) Start(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("nil context")
 	}
+	if m.stopped.Load() {
+		return errors.New("certificate provider stopped")
+	}
+	m.mu.Lock()
+	if m.done == nil {
+		m.done = make(chan struct{})
+	}
+	m.mu.Unlock()
 	if !m.started.CompareAndSwap(false, true) {
 		return nil
 	}
 	go func() {
+		defer m.doneOnce.Do(func() { close(m.done) })
 		ticker := m.clock.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -124,22 +161,48 @@ func (m *Supplied) Start(ctx context.Context) error {
 	return nil
 }
 
+func (m *Supplied) Close() error {
+	if m == nil {
+		return nil
+	}
+	m.stopped.Store(true)
+	if !m.started.Load() {
+		m.doneOnce.Do(func() { close(m.done) })
+	}
+	<-m.done
+	return nil
+}
+
 func (m *Supplied) ReloadOnce(ctx context.Context) contract.ReloadResult {
 	failure, _ := contract.ParseReloadResult("failure")
 	success, _ := contract.ParseReloadResult("success")
 	recovered, _ := contract.ParseReloadResult("recovered")
 	if ctx == nil || ctx.Err() != nil {
-		return failure
+		return m.observeResult(failure)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.load(); err != nil {
+	changed, err := m.load()
+	if err != nil {
 		m.failed = true
-		return failure
+		if errors.Is(err, errUnchangedInvalidCertificate) {
+			return failure
+		}
+		return m.observeResult(failure)
 	}
 	if m.failed {
 		m.failed = false
-		return recovered
+		return m.observeResult(recovered)
 	}
-	return success
+	if !changed {
+		return success
+	}
+	return m.observeResult(success)
+}
+
+func (m *Supplied) observeResult(result contract.ReloadResult) contract.ReloadResult {
+	if m != nil && m.observe != nil {
+		m.observe(result)
+	}
+	return result
 }

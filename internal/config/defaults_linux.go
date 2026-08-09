@@ -27,5 +27,6 @@ func PlatformSecurityPolicies() (SecurityPolicies, error) {
 	rootDir := securefs.LinuxExactPermissions(0, fs.FileMode(0o755))
 	configFile := securefs.LinuxExactPermissions(0, fs.FileMode(0o644))
 	stateDir := securefs.LinuxExactPermissions(uid, fs.FileMode(0o700))
-	return SecurityPolicies{ConfigContainer: securefs.RootPolicy{Access: rootDir}, ConfigDirectory: securefs.RootPolicy{Access: rootDir}, ConfigFile: securefs.FilePolicy{Presence: securefs.Required, Kind: securefs.RegularFile, Access: configFile, MaxBytes: int64(contract.V1().ConfigBytes)}, StateContainer: securefs.RootPolicy{Access: rootDir}, StateDirectory: securefs.RootPolicy{Access: stateDir}}, nil
+	stateFile := securefs.LinuxExactPermissions(uid, fs.FileMode(0o600))
+	return SecurityPolicies{ConfigContainer: securefs.RootPolicy{Access: rootDir}, ConfigDirectory: securefs.RootPolicy{Access: rootDir}, ConfigFile: securefs.FilePolicy{Presence: securefs.Required, Kind: securefs.RegularFile, Access: configFile, MaxBytes: int64(contract.V1().ConfigBytes)}, StateContainer: securefs.RootPolicy{Access: rootDir}, StateDirectory: securefs.RootPolicy{Access: stateDir}, StateFile: securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, Access: stateFile, MaxBytes: int64(contract.V1().StoreBytes)}}, nil
 }

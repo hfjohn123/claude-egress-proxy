@@ -25,8 +25,9 @@ jobs:
           check-latest: true
       - shell: pwsh
         run: |
-          gofmt -l (git ls-files -co --exclude-standard -- '*.go')
+          $unformatted = @(gofmt -l (git ls-files -co --exclude-standard -- '*.go'))
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($unformatted.Count -ne 0) { $unformatted | Write-Error; exit 1 }
           go vet ./...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./... -count=1
@@ -34,13 +35,23 @@ jobs:
           go test -race ./internal/... ./integration/... -count=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./internal/policy -run=Fuzz -fuzz=FuzzAuthority -fuzztime=30s
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./internal/credential -run=Fuzz -fuzz=FuzzCredentialDecode -fuzztime=30s
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./internal/credential -run=Fuzz -fuzz=FuzzBasicVerifier -fuzztime=30s
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./internal/wire -run=Fuzz -fuzz=FuzzFramingValues -fuzztime=30s
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # target windows/amd64
-          GOOS=windows GOARCH=amd64 go build ./cmd/claude-egress-proxy
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          go build ./cmd/claude-egress-proxy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # target windows/arm64
-          GOOS=windows GOARCH=arm64 go build ./cmd/claude-egress-proxy
+          $env:GOARCH = 'arm64'
+          go build ./cmd/claude-egress-proxy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:GOOS, Env:GOARCH -ErrorAction SilentlyContinue
           pwsh -NoProfile -File scripts/verify-generated.ps1
           pwsh -NoProfile -File scripts/verify-public-data.ps1
           go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
@@ -63,7 +74,7 @@ jobs:
       - shell: pwsh
         run: pwsh -NoProfile -File scripts/verify-secrets.ps1
       - name: build immutable OCI archive
-        run: docker buildx build --load --tag claude-egress-proxy:ci -f deploy/docker/Dockerfile . && docker save --output out/ci-image.tar claude-egress-proxy:ci
+        run: mkdir -p out && docker buildx build --load --tag claude-egress-proxy:ci -f deploy/docker/Dockerfile . && docker save --output out/ci-image.tar claude-egress-proxy:ci
       - shell: pwsh
         run: pwsh -NoProfile -File scripts/verify-container.ps1 -Archive out/ci-image.tar -ReportDirectory out/container-scan -SourceCommit '${{ github.sha }}' -Platform linux/amd64
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

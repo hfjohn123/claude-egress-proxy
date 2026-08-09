@@ -13,11 +13,16 @@ import (
 
 func credentialMutableTestRoot(t *testing.T) (securefs.MutableRoot, securefs.FilePolicy) {
 	t.Helper()
-	p := securefs.LinuxExactPermissions(uint32(os.Getuid()), fs.FileMode(0o700))
-	root, err := securefs.OpenMutableRoot(t.TempDir(), securefs.RootPolicy{Access: p})
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directoryPermissions := securefs.LinuxExactPermissions(uint32(os.Getuid()), fs.FileMode(0o700))
+	filePermissions := securefs.LinuxExactPermissions(uint32(os.Getuid()), fs.FileMode(0o600))
+	root, err := securefs.OpenMutableRoot(directory, securefs.RootPolicy{Access: directoryPermissions})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = root.Close() })
-	return root, securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, Access: p, MaxBytes: int64(contract.V1().StoreBytes)}
+	return root, securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, Access: filePermissions, MaxBytes: int64(contract.V1().StoreBytes)}
 }

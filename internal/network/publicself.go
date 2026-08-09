@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
+	"github.com/hfjohn123/claude-egress-proxy/internal/policy"
 )
 
 // PublicSelf holds immutable public-self snapshots. Refresh serializes one
@@ -51,6 +52,16 @@ func (p *PublicSelf) Refresh(ctx context.Context) PublicSelfSnapshot {
 	return p.refresh(ctx, false)
 }
 
+// Acquire returns a snapshot fresh enough for one outbound setup, refreshing
+// synchronously only when the published snapshot can no longer be trusted.
+func (p *PublicSelf) Acquire(ctx context.Context) PublicSelfSnapshot {
+	snapshot := p.Snapshot()
+	if freshPublicSelfAt(snapshot, p.now()) {
+		return snapshot
+	}
+	return p.Refresh(ctx)
+}
+
 func (p *PublicSelf) refresh(ctx context.Context, onlyIfDue bool) PublicSelfSnapshot {
 	p.mu.Lock()
 	if onlyIfDue && !p.lastRefresh.IsZero() && p.now().Sub(p.lastRefresh) < 30*time.Second {
@@ -75,30 +86,41 @@ func (p *PublicSelf) refresh(ctx context.Context, onlyIfDue bool) PublicSelfSnap
 	p.mu.Unlock()
 
 	addresses := configured
+	var resolved []netip.Addr
 	var err error
 	if mode != PublicSelfLoopback && resolver != nil && host != "" {
-		var resolved []netip.Addr
 		resolved, err = resolver.LookupA(ctx, host)
 		addresses = append(addresses, resolved...)
 	}
-	s := PublicSelfSnapshot{ObservedAt: p.now(), Coverage: "configured_and_resolved"}
+	s := PublicSelfSnapshot{ObservedAt: p.now(), Coverage: "configured_and_resolved", Mode: mode}
 	if err != nil || len(addresses) > 64 {
 		s.Outcome = publicSelfOutcome("failure")
 	} else if mode == PublicSelfLoopback {
 		s.Outcome = publicSelfOutcome("success_empty")
 	} else {
 		seen := make(map[netip.Addr]struct{}, len(addresses))
+		unsafe := false
 		for _, address := range addresses {
+			if address.Is4In6() {
+				unsafe = true
+				break
+			}
 			address = address.Unmap()
-			if !address.Is4() {
-				continue
+			if !address.Is4() || policy.Classify(address) != policy.AddressGlobalIPv4 {
+				unsafe = true
+				break
 			}
 			if _, ok := seen[address]; !ok && len(s.Addresses) < 64 {
 				seen[address] = struct{}{}
 				s.Addresses = append(s.Addresses, address)
 			}
 		}
-		if len(s.Addresses) == 0 {
+		if unsafe {
+			s.Addresses = nil
+			s.Outcome = publicSelfOutcome("failure")
+		} else if mode == PublicSelfACME && len(resolved) == 0 {
+			s.Outcome = publicSelfOutcome("success_empty")
+		} else if len(s.Addresses) == 0 {
 			s.Outcome = publicSelfOutcome("success_empty")
 		} else {
 			s.Outcome = publicSelfOutcome("positive")
@@ -142,6 +164,7 @@ type PublicSelfSnapshot struct {
 	Outcome    contract.PublicSelfOutcome
 	Addresses  []netip.Addr
 	Coverage   string
+	Mode       PublicSelfMode
 }
 
 func (s PublicSelfSnapshot) addressSet() map[netip.Addr]struct{} {

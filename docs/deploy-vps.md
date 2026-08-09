@@ -10,12 +10,18 @@ account with `/etc/claude-egress-proxy` and `/var/lib/claude-egress-proxy`
 protected from other users. On Windows, use the supported service command and
 the generated per-user state root; do not broaden its ACLs.
 
-Compose is optional. A standalone container must persist only the protected
-configuration/state mounts and should stop gracefully:
+Compose is optional. For a standalone container, first initialize the named
+state volume as the image's service UID, then mount the absolute configuration
+read-only and the initialized state read-write:
 
 ```text
-docker run --stop-timeout 25 --read-only --publish 443:443 IMAGE
+docker volume create claude-egress-proxy-state
+docker run --rm --user 0:0 --read-only --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --security-opt no-new-privileges --volume claude-egress-proxy-state:/var/lib/claude-egress-proxy:rw --entrypoint /usr/local/bin/claude-egress-proxy-state-init IMAGE
+docker run --stop-timeout 25 --read-only --cap-drop ALL --security-opt no-new-privileges --publish 443:8443 --volume /absolute/config.yaml:/etc/claude-egress-proxy/config.yaml:ro --volume claude-egress-proxy-state:/var/lib/claude-egress-proxy:rw IMAGE
 ```
+
+The mounted container configuration must listen on `0.0.0.0:8443`; public TCP
+443 is forwarded to that unprivileged internal port.
 
 Do not publish an admin port. Do not expose insecure loopback. Keep the TLS
 private key and state volume out of image layers, source control, backups shared

@@ -153,10 +153,6 @@ func (r *Repository) CommitSuccessor(ctx context.Context, successor ValidatedSna
 }
 
 func (r *Repository) commitLocked(ctx context.Context, lock securefs.LockedFile, successor ValidatedSnapshot) error {
-	data, err := EncodeCanonical(successor)
-	if err != nil {
-		return ErrInvalid
-	}
 	in, err := inspectFiles(heldLockReader{LockedFile: lock}, r.instance, r.policy)
 	if err != nil {
 		return err
@@ -194,6 +190,22 @@ func (r *Repository) commitLocked(ctx context.Context, lock securefs.LockedFile,
 	}
 	if successor.Generation() != current+1 {
 		return ErrRollbackConflict
+	}
+	var predecessorDigest [sha256.Size]byte
+	if in.State == StoreCoherent {
+		predecessorBytes, err := EncodeCanonical(in.Snapshot)
+		if err != nil {
+			return ErrRollbackConflict
+		}
+		predecessorDigest = sha256.Sum256(predecessorBytes)
+	}
+	if successor.predecessorSet && !successor.predecessorMatches(current, predecessorDigest) {
+		return ErrRollbackConflict
+	}
+	successor = successor.withPredecessor(current, predecessorDigest)
+	data, err := EncodeCanonical(successor)
+	if err != nil {
+		return ErrInvalid
 	}
 	mode := securefs.AbsentTarget
 	if current != 0 {
@@ -312,7 +324,7 @@ func inspectFiles(root storeReader, instance [16]byte, policy securefs.FilePolic
 	if cp.generation == snapshot.Generation() && cp.digest == digest {
 		return Inspection{State: StoreCoherent, Snapshot: snapshot}, nil
 	}
-	if snapshot.Generation() == cp.generation+1 {
+	if snapshot.Generation() == cp.generation+1 && snapshot.predecessorMatches(cp.generation, cp.digest) {
 		return Inspection{State: StoreSuccessor, Snapshot: snapshot}, nil
 	}
 	return Inspection{State: StoreConflict, Snapshot: snapshot}, nil

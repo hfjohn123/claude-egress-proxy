@@ -40,22 +40,12 @@ func TestWindowsDefaultsUseOnlyKnownProgramData(t *testing.T) {
 	}
 }
 
-func TestWindowsSecurityPoliciesResolveExactVirtualServiceAccount(t *testing.T) {
-	old := lookupServiceSID
-	t.Cleanup(func() { lookupServiceSID = old })
-	var gotSystem, gotAccount string
-	lookupServiceSID = func(system, account string) (*windows.SID, string, uint32, error) {
-		gotSystem, gotAccount = system, account
-		if account != `NT SERVICE\ClaudeEgressProxy` {
-			return nil, "", 0, errors.New("bare or wrong service account")
-		}
-		sid, err := windows.StringToSid("S-1-5-18")
-		return sid, "NT SERVICE", 0, err
+func TestWindowsSecurityPoliciesUseDeterministicVirtualServiceSID(t *testing.T) {
+	sid, err := windows.StringToSid(claudeEgressProxyServiceSID)
+	if err != nil || !sid.IsValid() || sid.String() != claudeEgressProxyServiceSID {
+		t.Fatalf("service SID=%v err=%v", sid, err)
 	}
 	if _, err := PlatformSecurityPolicies(); err != nil {
 		t.Fatalf("PlatformSecurityPolicies = %v", err)
-	}
-	if gotSystem != "" || gotAccount != `NT SERVICE\ClaudeEgressProxy` {
-		t.Fatalf("LookupSID(%q, %q), want local exact virtual-service account", gotSystem, gotAccount)
 	}
 }

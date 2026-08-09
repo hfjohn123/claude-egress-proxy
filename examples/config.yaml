@@ -5,7 +5,8 @@ public_listener:
   addresses: [0.0.0.0:443]
   pac_enabled: false
 admin_listener:
-  enabled: false
+  enabled: true
+  address: 127.0.0.1:9090
 tls:
   mode: acme
   hostname: proxy.example.com

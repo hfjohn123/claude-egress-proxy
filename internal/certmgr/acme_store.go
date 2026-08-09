@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
 )
 
 const maxACMEStateBytes = 1 << 20
@@ -24,10 +26,46 @@ type ACMEState struct {
 	PrivateKeyPEM  []byte `json:"private_key_pem"`
 }
 
-// ACMEStore persists one bounded state document with owner-only permissions.
-type ACMEStore struct{ Path string }
+// ACMEStore persists one bounded state document. Production callers provide a
+// pinned securefs root; Path remains only for isolated filesystem tests.
+type ACMEStore struct {
+	Path    string
+	Root    securefs.ReadRoot
+	Mutable securefs.MutableRoot
+	Name    string
+	Policy  securefs.FilePolicy
+}
+
+func (s ACMEStore) Valid() bool {
+	return s.secure() || filepath.IsAbs(s.Path)
+}
+
+func (s ACMEStore) secure() bool {
+	return s.Root != nil && s.Name != "" && filepath.Base(s.Name) == s.Name && s.Policy.Kind == securefs.RegularFile && s.Policy.MaxBytes == maxACMEStateBytes
+}
 
 func (s ACMEStore) Load() (ACMEState, error) {
+	if s.secure() {
+		if err := s.Root.RecheckIdentity(); err != nil {
+			return ACMEState{}, ErrACMEStateInvalid
+		}
+		optional := s.Policy
+		optional.Presence = securefs.Optional
+		state, err := s.Root.Inspect(s.Name, optional)
+		if err != nil {
+			return ACMEState{}, ErrACMEStateInvalid
+		}
+		if !state.Present {
+			return ACMEState{}, ErrACMEStateAbsent
+		}
+		required := s.Policy
+		required.Presence = securefs.Required
+		data, readState, err := s.Root.ReadFile(s.Name, required)
+		if err != nil || readState.Identity != state.Identity || int64(len(data)) != state.Size {
+			return ACMEState{}, ErrACMEStateInvalid
+		}
+		return decodeACMEState(data)
+	}
 	if !filepath.IsAbs(s.Path) {
 		return ACMEState{}, ErrACMEStateInvalid
 	}
@@ -42,19 +80,30 @@ func (s ACMEStore) Load() (ACMEState, error) {
 	if err != nil || len(data) > maxACMEStateBytes {
 		return ACMEState{}, ErrACMEStateInvalid
 	}
-	var state ACMEState
-	if json.Unmarshal(data, &state) != nil || len(state.AccountKeyPEM) == 0 || len(state.CertificatePEM) == 0 || len(state.PrivateKeyPEM) == 0 {
-		return ACMEState{}, ErrACMEStateInvalid
-	}
-	return state, nil
+	return decodeACMEState(data)
 }
 
 func (s ACMEStore) Save(ctx context.Context, state ACMEState) error {
-	if ctx == nil || ctx.Err() != nil || !filepath.IsAbs(s.Path) || len(state.AccountKeyPEM) == 0 || len(state.CertificatePEM) == 0 || len(state.PrivateKeyPEM) == 0 {
+	if ctx == nil || ctx.Err() != nil || len(state.AccountKeyPEM) == 0 || len(state.CertificatePEM) == 0 || len(state.PrivateKeyPEM) == 0 {
 		return ErrACMEStateInvalid
 	}
 	data, err := json.Marshal(state)
 	if err != nil || len(data) > maxACMEStateBytes {
+		return ErrACMEStateInvalid
+	}
+	if s.secure() {
+		if s.Mutable == nil {
+			return ErrACMEStateInvalid
+		}
+		policy := s.Policy
+		policy.Presence = securefs.Optional
+		boundary, err := s.Mutable.PublishOutput(ctx, s.Name, data, policy)
+		if err != nil || !boundary.NamespacePublished || !boundary.TargetDurable {
+			return ErrACMEStateInvalid
+		}
+		return nil
+	}
+	if !filepath.IsAbs(s.Path) {
 		return ErrACMEStateInvalid
 	}
 	parent := filepath.Dir(s.Path)
@@ -92,4 +141,22 @@ func (s ACMEStore) Save(ctx context.Context, state ACMEState) error {
 		return ErrACMEStateInvalid
 	}
 	return nil
+}
+
+func (s ACMEStore) Close() error {
+	if s.Mutable != nil {
+		return s.Mutable.Close()
+	}
+	return nil
+}
+
+func decodeACMEState(data []byte) (ACMEState, error) {
+	if len(data) == 0 || len(data) > maxACMEStateBytes {
+		return ACMEState{}, ErrACMEStateInvalid
+	}
+	var state ACMEState
+	if json.Unmarshal(data, &state) != nil || len(state.AccountKeyPEM) == 0 || len(state.CertificatePEM) == 0 || len(state.PrivateKeyPEM) == 0 {
+		return ACMEState{}, ErrACMEStateInvalid
+	}
+	return state, nil
 }

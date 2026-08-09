@@ -86,7 +86,6 @@ func TestDecodeValidatesBoundsAndCrossFields(t *testing.T) {
 		"explicit empty source":     base + "outbound_source_ipv4: ''\n",
 		"empty admin address":       base + "admin_listener:\n  enabled: true\n  address: ''\n",
 		"forbidden ACME file key":   strings.Replace(base, "tls:\n  mode: acme\n  hostname: proxy.example.com\n", "tls:\n  mode: acme\n  hostname: proxy.example.com\n  certificate_file: ''\n", 1),
-		"ACME wrong port":           strings.Replace(base, "tls:\n", "public_listener:\n  addresses: [0.0.0.0:8443]\n  pac_enabled: false\ntls:\n", 1),
 		"bad hostname":              strings.Replace(base, "proxy.example.com", "Proxy_example.com", 1),
 		"bad instance":              strings.Replace(base, "000102030405060708090a0b0c0d0e0f", "ABC", 1),
 	}
@@ -96,6 +95,17 @@ func TestDecodeValidatesBoundsAndCrossFields(t *testing.T) {
 				t.Fatalf("Decode error = %v, want ErrValue", err)
 			}
 		})
+	}
+}
+
+func TestDecodeAllowsACMEBehindExternalPortMapping(t *testing.T) {
+	document := strings.Replace(string(validDocument(t)), "tls:\n", "public_listener:\n  addresses: [0.0.0.0:8443]\n  pac_enabled: false\ntls:\n", 1)
+	decoded, err := config.Decode([]byte(document))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decoded.PublicListener().Addresses()[0].Port(); got != 8443 {
+		t.Fatalf("port = %d, want 8443", got)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,8 @@ type DirectTransportConfig struct {
 	// PublicSelf, when supplied, must return a fresh positive snapshot before
 	// the CA endpoint may be resolved or dialed.
 	PublicSelf func() network.PublicSelfSnapshot
+	Acquire    func(context.Context) network.PublicSelfSnapshot
+	Source     network.SourceChecker
 	Now        func() time.Time
 }
 
@@ -55,15 +58,19 @@ func NewDirectTransport(config DirectTransportConfig) (*http.Transport, error) {
 	return &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, networkName, address string) (net.Conn, error) {
-			if config.PublicSelf != nil {
-				now := timebase.Real{}.Now()
-				if config.Now != nil {
-					now = config.Now()
-				}
-				snapshot := config.PublicSelf()
-				if snapshot.Outcome.String() != "positive" || snapshot.ObservedAt.Before(now.Add(-5*time.Second)) || snapshot.ObservedAt.After(now.Add(time.Second)) {
-					return nil, errUnsafeACMEEndpoint
-				}
+			if config.PublicSelf == nil {
+				return nil, errUnsafeACMEEndpoint
+			}
+			now := timebase.Real{}.Now()
+			if config.Now != nil {
+				now = config.Now()
+			}
+			snapshot := config.PublicSelf()
+			if !network.FreshPublicSelfAt(snapshot, now) && config.Acquire != nil {
+				snapshot = config.Acquire(ctx)
+			}
+			if !network.FreshPublicSelfAt(snapshot, now) {
+				return nil, errUnsafeACMEEndpoint
 			}
 			host, port, err := net.SplitHostPort(address)
 			if err != nil {
@@ -78,23 +85,13 @@ func NewDirectTransport(config DirectTransportConfig) (*http.Transport, error) {
 			if err != nil {
 				return nil, err
 			}
-			if len(answers) == 0 || len(answers) > 4 {
+			portNumber, err := strconv.ParseUint(port, 10, 16)
+			if err != nil || portNumber == 0 {
 				return nil, errUnsafeACMEEndpoint
 			}
-			var last error
-			for _, answer := range answers {
-				if !answer.Is4() {
-					return nil, errUnsafeACMEEndpoint
-				}
-				attemptCtx, attemptCancel := context.WithTimeout(ctx, 10*time.Second)
-				conn, err := dial(attemptCtx, "tcp4", net.JoinHostPort(answer.String(), port), netip.Addr{})
-				attemptCancel()
-				if err == nil {
-					return conn, nil
-				}
-				last = err
-			}
-			return nil, last
+			dialer := network.Dialer{Source: config.Source, Dial: dial, Snapshot: config.PublicSelf, Now: config.Now}
+			conn, _, err := dialer.DialCandidates(ctx, host, uint16(portNumber), answers, snapshot)
+			return conn, err
 		},
 		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: config.RootCAs},
 		TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 10 * time.Second,

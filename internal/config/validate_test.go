@@ -51,14 +51,40 @@ func TestLoaderRetainsRootsAndBorrowCannotCloseThem(t *testing.T) {
 	}
 }
 
-func TestLoaderRejectsUnavailableAndUnknownModesBeforeOpening(t *testing.T) {
+func TestLoaderOperationalModesUseNormalReadErrorsAndRejectUnknownMode(t *testing.T) {
 	for _, mode := range []config.ValidationMode{config.ValidateOperational, config.ValidatePreServe} {
-		if _, err := (config.Loader{}).Load(filepath.Join(t.TempDir(), "missing"), mode); !errors.Is(err, config.ErrValidationUnavailable) {
+		if _, err := (config.Loader{}).Load(filepath.Join(t.TempDir(), "missing"), mode); !errors.Is(err, config.ErrRead) {
 			t.Fatalf("mode %d error = %v", mode, err)
 		}
 	}
 	if _, err := (config.Loader{}).Load(filepath.Join(t.TempDir(), "missing"), config.ValidationInvalid); !errors.Is(err, config.ErrValue) {
 		t.Fatalf("invalid mode error = %v", err)
+	}
+}
+
+func TestLoaderOperationalAcceptsSafePristineRuntimeState(t *testing.T) {
+	base := t.TempDir()
+	state := filepath.Join(base, "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(base, "config.yaml")
+	doc := fmt.Sprintf("format_version: 1\ninstance_id: 000102030405060708090a0b0c0d0e0f\nstate_root: %q\ntls:\n  mode: acme\n  hostname: proxy.example.com\n", state)
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := securefs.IdentityOnlyPermissions()
+	loader := config.Loader{Policies: config.SecurityPolicies{
+		ConfigDirectory: securefs.RootPolicy{Access: p}, ConfigFile: securefs.FilePolicy{Presence: securefs.Required, Kind: securefs.RegularFile, Access: p, MaxBytes: int64(contract.V1().ConfigBytes)},
+		StateDirectory: securefs.RootPolicy{Access: p},
+	}}
+	loaded, err := loader.Load(path, config.ValidateOperational)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loaded.Close()
+	if loaded.ValidationMode() != config.ValidateOperational {
+		t.Fatalf("mode=%v", loaded.ValidationMode())
 	}
 }
 

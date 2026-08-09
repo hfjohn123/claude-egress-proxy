@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/cli"
+	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
 )
 
 func TestRunDispatchesEveryCommandToItsFrozenHandler(t *testing.T) {
@@ -40,6 +41,14 @@ func TestRunDispatchesEveryCommandToItsFrozenHandler(t *testing.T) {
 				t.Fatalf("Run output = stdout %q stderr %q, want dispatched handler output", got, stderr.String())
 			}
 		})
+	}
+}
+
+func TestRunServiceReturnsSCMSpecificDiagnosticCode(t *testing.T) {
+	deps := Dependencies{Serve: func(context.Context, cli.Invocation) Result { return initFailure(contract.D007) }}
+	specific, code := RunService(context.Background(), deps, []string{"serve"})
+	if !specific || code != contract.ServiceCode(contract.D007) {
+		t.Fatalf("RunService specific=%v code=%d", specific, code)
 	}
 }
 

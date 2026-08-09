@@ -21,11 +21,11 @@ $image = Read-LockedImage 'gitleaks'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Invoke-CheckedNative docker @('version', '--format', '{{.Server.Version}}')
 Invoke-CheckedNative docker @('pull', $image)
-$mount = "$root:/repo:ro"
-$base = @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '-v', $mount, '-w', '/repo', $image, 'git', '--config', 'safe.directory=/repo', 'gitleaks', 'git', '--log-opts=--all', '--redact=100')
+$mount = "${root}:/repo:ro"
+$base = @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '-e', 'GIT_CONFIG_COUNT=1', '-e', 'GIT_CONFIG_KEY_0=safe.directory', '-e', 'GIT_CONFIG_VALUE_0=/repo', '-v', $mount, '-w', '/repo', $image, 'git', '--log-opts=--all', '--redact=100')
 Invoke-CheckedNative docker $base
 Invoke-CheckedNative docker @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '-v', $mount, '-w', '/repo', $image, 'dir', '--redact=100', '/repo')
 if ($ReleaseStagingDirectory) {
     $release = (Resolve-Path $ReleaseStagingDirectory).Path
-    Invoke-CheckedNative docker @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '-v', "$release:/release:ro", $image, 'dir', '--redact=100', '/release')
+    Invoke-CheckedNative docker @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '-v', "${release}:/release:ro", $image, 'dir', '--redact=100', '/release')
 }

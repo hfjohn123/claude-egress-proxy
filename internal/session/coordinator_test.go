@@ -2,6 +2,7 @@ package session
 
 import (
 	"crypto/sha256"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -22,9 +23,45 @@ func TestCoordinatorUnavailableRejectsAndReleasesLease(t *testing.T) {
 	if !decision.Allowed() {
 		t.Fatal("acquire")
 	}
-	_, _, _ = c.Authenticate(nil, le, time.Unix(0, 0))
+	_, _, _ = c.Authenticate(nil, false, admission.Prefix{}, le, time.Unix(0, 0))
 	if c.Snapshot().PreAuthConnections != 0 {
 		t.Fatal("lease retained")
+	}
+}
+
+func TestAuthenticateMissingChallengesWithoutSpendingInvalidLimiter(t *testing.T) {
+	clock := fixedClock{time.Unix(0, 0)}
+	auth := admission.NewAuthentication(clock)
+	c := NewCoordinator(credential.Verifier{}, auth)
+	snapshot, _ := credential.NewValidatedSnapshot([16]byte{}, 1, nil)
+	c.InstallCredentials(snapshot)
+	prefix := admission.Aggregate(netip.MustParseAddr("198.51.100.2"))
+	for range 20 {
+		_, outcome, _ := c.Authenticate(nil, false, prefix, admission.PublicLease{}, clock.Now())
+		if outcome.String() != "challenge" {
+			t.Fatalf("missing auth outcome=%s", outcome)
+		}
+	}
+	if auth.Entries() != 0 {
+		t.Fatalf("missing auth allocated %d limiter entries", auth.Entries())
+	}
+}
+
+func TestAuthenticatePresentInvalidUsesFailureLimiter(t *testing.T) {
+	clock := fixedClock{time.Unix(0, 0)}
+	c := NewCoordinator(credential.Verifier{}, admission.NewAuthentication(clock))
+	snapshot, _ := credential.NewValidatedSnapshot([16]byte{}, 1, nil)
+	c.InstallCredentials(snapshot)
+	prefix := admission.Aggregate(netip.MustParseAddr("198.51.100.3"))
+	for i := range 11 {
+		_, outcome, _ := c.Authenticate([]byte("Basic bad"), true, prefix, admission.PublicLease{}, clock.Now())
+		want := "invalid"
+		if i == 10 {
+			want = "throttled"
+		}
+		if outcome.String() != want {
+			t.Fatalf("attempt %d outcome=%s want=%s", i+1, outcome, want)
+		}
 	}
 }
 

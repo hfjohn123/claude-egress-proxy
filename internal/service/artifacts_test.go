@@ -25,7 +25,7 @@ func TestSystemdArtifactUsesBoundedServiceProfile(t *testing.T) {
 func TestContainerArtifactsUseNonRootBoundedProfile(t *testing.T) {
 	dockerfile := readArtifact(t, "deploy", "docker", "Dockerfile")
 	for _, want := range []string{
-		"USER 65532:65532", "EXPOSE 8443", "STOPSIGNAL SIGTERM",
+		"USER 65532:65532", "EXPOSE 8443", "STOPSIGNAL SIGTERM", "/etc/ssl/certs/ca-certificates.crt",
 		`HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/usr/local/bin/claude-egress-proxy","check","health","--address","127.0.0.1:9090"]`,
 	} {
 		if !strings.Contains(dockerfile, want) {
@@ -39,13 +39,16 @@ func TestContainerArtifactsUseNonRootBoundedProfile(t *testing.T) {
 	}
 	compose := readArtifact(t, "deploy", "docker", "compose.yaml")
 	for _, want := range []string{
-		"- \"443:8443\"", "read_only: true", "cap_drop:", "- ALL",
+		"- \"443:8443\"", "read_only: true", "cap_drop:", "- ALL", "security_opt:", "- no-new-privileges:true",
 		"stop_signal: SIGTERM", "stop_grace_period: 25s", "- /etc/claude-egress-proxy/config.yaml:/etc/claude-egress-proxy/config.yaml:ro",
 		"- claude-egress-proxy-state:/var/lib/claude-egress-proxy:rw",
 	} {
 		if !strings.Contains(compose, want) {
 			t.Fatalf("compose missing %q", want)
 		}
+	}
+	if strings.Contains(compose, "NET_BIND_SERVICE") {
+		t.Fatal("container proxy must not retain privileged-port capability")
 	}
 }
 

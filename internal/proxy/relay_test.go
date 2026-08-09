@@ -57,3 +57,54 @@ func TestRelayBufferedDeliversBytesReadBeforeHijack(t *testing.T) {
 		t.Fatal("relay did not stop")
 	}
 }
+
+func TestRelayWithLimitsReturnsCanonicalCleanOutcome(t *testing.T) {
+	client, tunnel := net.Pipe()
+	origin, upstream := net.Pipe()
+	defer upstream.Close()
+	done := make(chan RelayResult, 1)
+	go func() { done <- RelayBufferedWithLimits(tunnel, tunnel, origin, time.Second, 0) }()
+	_ = client.Close()
+	select {
+	case got := <-done:
+		if got.CloseResult.String() != "clean" {
+			t.Fatalf("close result=%s want clean", got.CloseResult)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("relay did not stop")
+	}
+}
+
+func TestRelayWithLimitsEnforcesIdleTimeout(t *testing.T) {
+	client, tunnel := net.Pipe()
+	origin, upstream := net.Pipe()
+	defer client.Close()
+	defer upstream.Close()
+	done := make(chan RelayResult, 1)
+	go func() { done <- RelayBufferedWithLimits(tunnel, tunnel, origin, 20*time.Millisecond, 0) }()
+	select {
+	case got := <-done:
+		if got.CloseResult.String() != "idle_timeout" {
+			t.Fatalf("close result=%s want idle_timeout", got.CloseResult)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("idle timeout did not stop relay")
+	}
+}
+
+func TestRelayWithLimitsEnforcesAbsoluteLifetime(t *testing.T) {
+	client, tunnel := net.Pipe()
+	origin, upstream := net.Pipe()
+	defer client.Close()
+	defer upstream.Close()
+	done := make(chan RelayResult, 1)
+	go func() { done <- RelayBufferedWithLimits(tunnel, tunnel, origin, time.Second, 20*time.Millisecond) }()
+	select {
+	case got := <-done:
+		if got.CloseResult.String() != "absolute_lifetime" {
+			t.Fatalf("close result=%s want absolute_lifetime", got.CloseResult)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("absolute lifetime did not stop relay")
+	}
+}

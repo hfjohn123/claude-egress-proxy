@@ -1,6 +1,7 @@
 package certmgr
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -86,6 +87,16 @@ func TestSelectCertificateTimeBoundary(t *testing.T) {
 				t.Fatalf("success=%v want %v (%v)", err == nil, tt.want, err)
 			}
 		})
+	}
+}
+
+func TestBareManagerCannotReportReloadSuccess(t *testing.T) {
+	manager := New("proxy.example.com", nil)
+	if got := manager.ReloadOnce(context.Background()).String(); got != "failure" {
+		t.Fatalf("ReloadOnce=%s, want failure", got)
+	}
+	if err := manager.Start(context.Background()); err == nil {
+		t.Fatal("bare Manager Start succeeded")
 	}
 }
 

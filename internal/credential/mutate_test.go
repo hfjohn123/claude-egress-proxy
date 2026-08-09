@@ -3,6 +3,7 @@ package credential
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"testing"
 	"time"
@@ -122,6 +123,7 @@ func TestCredentialMutationRejectsExhaustedGenerationWithoutPublication(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	snapshot = snapshot.withPredecessor((1<<53)-2, sha256.Sum256([]byte("predecessor")))
 	data, err := EncodeCanonical(snapshot)
 	if err != nil {
 		t.Fatal(err)

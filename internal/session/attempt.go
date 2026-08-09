@@ -1,6 +1,9 @@
 package session
 
 import (
+	"net/netip"
+	"time"
+
 	"github.com/hfjohn123/claude-egress-proxy/internal/admission"
 	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
 	"github.com/hfjohn123/claude-egress-proxy/internal/credential"
@@ -14,8 +17,39 @@ type attempt struct {
 	lease       admission.PublicLease
 	handle      credential.AuthHandle
 	started     interface{}
+	prefix      netip.Prefix
+	destination string
 	live        bool
 }
+
+func SetDestination(value Attempt, hostname string) bool {
+	a, ok := value.(*attempt)
+	if !ok || a == nil || a.coordinator == nil || hostname == "" {
+		return false
+	}
+	a.coordinator.mu.Lock()
+	defer a.coordinator.mu.Unlock()
+	if !a.live {
+		return false
+	}
+	a.destination = hostname
+	return true
+}
+
+func SetSetupStarted(value Attempt, started time.Time) bool {
+	a, ok := value.(*attempt)
+	if !ok || a == nil || a.coordinator == nil || started.IsZero() {
+		return false
+	}
+	a.coordinator.mu.Lock()
+	defer a.coordinator.mu.Unlock()
+	if !a.live {
+		return false
+	}
+	a.started = started
+	return true
+}
+
 type publicLease struct {
 	lease    *admission.PublicLease
 	released bool
@@ -38,7 +72,7 @@ func (a *attempt) Release(r contract.ConnectResult) bool {
 	ok := a.releaseLocked(r)
 	a.coordinator.mu.Unlock()
 	if ok {
-		a.coordinator.notify(TerminalEvent{ConnectResult: r})
+		a.coordinator.notify(TerminalEvent{HasConnect: true, ConnectResult: r})
 	}
 	return ok
 }

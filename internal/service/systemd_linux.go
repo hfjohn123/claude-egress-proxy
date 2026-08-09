@@ -33,15 +33,15 @@ func runCommand(ctx context.Context, name string, arguments ...string) error {
 	return exec.CommandContext(ctx, name, arguments...).Run()
 }
 
-func (p systemdPlatform) Apply(ctx context.Context, action Action, configPath string) error {
+func (p systemdPlatform) Apply(ctx context.Context, action Action, selection Selection) error {
 	if p.run == nil {
 		return ErrUnsupported
 	}
 	switch action {
 	case Install:
-		return p.install(ctx, configPath)
+		return p.install(ctx, selection)
 	case Uninstall:
-		if err := p.requireInstalledSelector(configPath); err != nil {
+		if err := p.requireInstalledSelector(selection); err != nil {
 			return err
 		}
 		if err := p.run(ctx, "systemctl", "disable", "--now", serviceName); err != nil {
@@ -52,7 +52,7 @@ func (p systemdPlatform) Apply(ctx context.Context, action Action, configPath st
 		}
 		return p.run(ctx, "systemctl", "daemon-reload")
 	case Start, Stop:
-		if err := p.requireInstalledSelector(configPath); err != nil {
+		if err := p.requireInstalledSelector(selection); err != nil {
 			return err
 		}
 		return p.run(ctx, "systemctl", action.String(), serviceName)
@@ -61,8 +61,15 @@ func (p systemdPlatform) Apply(ctx context.Context, action Action, configPath st
 	}
 }
 
-func (p systemdPlatform) install(ctx context.Context, configPath string) error {
-	unit := renderUnit(configPath)
+func (p systemdPlatform) Prepare(ctx context.Context, action Action) (Undo, error) {
+	if action != Install || p.run == nil {
+		return nil, nil
+	}
+	return ensureSystemUser(ctx, p.run)
+}
+
+func (p systemdPlatform) install(ctx context.Context, selection Selection) error {
+	unit := renderUnit(selection)
 	return RunTransaction(ctx, []Step{
 		func(ctx context.Context) (Undo, error) { return ensureSystemUser(ctx, p.run) },
 		func(context.Context) (Undo, error) { return installUnit(unit) },
@@ -130,18 +137,18 @@ func installUnit(unit string) (Undo, error) {
 	return func(context.Context) error { return os.Remove(unitPath) }, nil
 }
 
-func (p systemdPlatform) requireInstalledSelector(configPath string) error {
+func (p systemdPlatform) requireInstalledSelector(selection Selection) error {
 	unit, err := os.ReadFile(unitPath)
 	if err != nil {
 		return err
 	}
-	if string(unit) != renderUnit(configPath) {
+	if string(unit) != renderUnit(selection) {
 		return fmt.Errorf("service selector conflict")
 	}
 	return nil
 }
 
-func renderUnit(configPath string) string {
+func renderUnit(selection Selection) string {
 	return fmt.Sprintf(`[Unit]
 Description=Claude Egress Proxy
 After=network-online.target
@@ -162,7 +169,7 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-ReadWritePaths=/var/lib/claude-egress-proxy
+ReadWritePaths=%s
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 StandardOutput=null
@@ -172,7 +179,7 @@ TimeoutStopSec=25s
 
 [Install]
 WantedBy=multi-user.target
-`, systemdQuote(configPath))
+`, systemdQuote(selection.ConfigPath), systemdQuote(selection.StateRoot))
 }
 
 func systemdQuote(value string) string {

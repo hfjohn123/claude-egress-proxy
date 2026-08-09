@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
 	"github.com/hfjohn123/claude-egress-proxy/internal/timebase"
 )
 
@@ -44,6 +45,40 @@ func TestSuppliedRejectsExpiredInitialCertificate(t *testing.T) {
 	writePair(t, certPath, keyPath, testCertificate(t, "proxy.example.com", now.Add(-2*time.Hour), now.Add(-time.Nanosecond)))
 	if _, err := NewSupplied(SuppliedConfig{Hostname: "proxy.example.com", CertificateFile: certPath, PrivateKeyFile: keyPath, Now: func() time.Time { return now }}); err == nil {
 		t.Fatal("accepted expired certificate")
+	}
+}
+
+func TestSuppliedUnchangedPollEmitsNoReloadAttempt(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	certPath, keyPath := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	writePair(t, certPath, keyPath, testCertificate(t, "proxy.example.com", now.Add(-time.Hour), now.Add(time.Hour)))
+	observed := 0
+	m, err := NewSupplied(SuppliedConfig{Hostname: "proxy.example.com", CertificateFile: certPath, PrivateKeyFile: keyPath, Now: func() time.Time { return now }, Observe: func(contract.ReloadResult) { observed++ }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.ReloadOnce(t.Context()).String(); got != "success" || observed != 0 {
+		t.Fatalf("unchanged result=%s observed=%d", got, observed)
+	}
+}
+
+func TestSuppliedUnchangedInvalidPairEmitsFailureOnce(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	certPath, keyPath := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	writePair(t, certPath, keyPath, testCertificate(t, "proxy.example.com", now.Add(-time.Hour), now.Add(time.Hour)))
+	observed := 0
+	m, err := NewSupplied(SuppliedConfig{Hostname: "proxy.example.com", CertificateFile: certPath, PrivateKeyFile: keyPath, Now: func() time.Time { return now }, Observe: func(contract.ReloadResult) { observed++ }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writePair(t, certPath, keyPath, testCertificate(t, "wrong.example.com", now.Add(-time.Hour), now.Add(time.Hour)))
+	if got := m.ReloadOnce(t.Context()).String(); got != "failure" || observed != 1 {
+		t.Fatalf("first invalid result=%s observed=%d", got, observed)
+	}
+	if got := m.ReloadOnce(t.Context()).String(); got != "failure" || observed != 1 {
+		t.Fatalf("unchanged invalid result=%s observed=%d", got, observed)
 	}
 }
 
