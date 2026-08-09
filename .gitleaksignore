@@ -1,0 +1,7 @@
+# Deterministic expected-output fixtures removed from current source. These
+# fingerprints retain strict history scanning without suppressing the rule or
+# either path for future commits.
+b0c7340fc473cb71b23498fb6388f10c1c451630:internal/app/credential_test.go:generic-api-key:44
+b0c7340fc473cb71b23498fb6388f10c1c451630:internal/app/credential_test.go:generic-api-key:45
+b0c7340fc473cb71b23498fb6388f10c1c451630:internal/app/credential_test.go:generic-api-key:46
+ea4baaf41572d49c24811982c7c9ff20d70638e8:internal/tools/profilegen/main_test.go:generic-api-key:90

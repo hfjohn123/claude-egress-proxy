@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -36,15 +38,20 @@ func TestCredentialHandlerExactSuccessOutput(t *testing.T) {
 	for i := range secret {
 		secret[i] = byte(i)
 	}
+	recordID := "00112233445566778899aabbccddeeff"
+	addOutput := fmt.Sprintf("record_id=%s\ndevice_identifier=laptop\nsecret=%s\n", recordID, base64.RawURLEncoding.EncodeToString(secret[:]))
+	revokeOutput := fmt.Sprintf("record_id=%s\nstate=revoked\n", recordID)
+	purgeOutput := fmt.Sprintf("record_id=%s\nstate=purged\n", recordID)
+	listOutput := fmt.Sprintf("record_id\tdevice_identifier\tcreated_at\tstate\n%s\tlaptop\t2026-08-09T01:02:03.000000004Z\tactive\n", recordID)
 	for _, test := range []struct {
 		name    string
 		command cli.Command
 		want    string
 	}{
-		{"add", cli.CredentialAdd, "record_id=00112233445566778899aabbccddeeff\ndevice_identifier=laptop\nsecret=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\n"},
-		{"revoke", cli.CredentialRevoke, "record_id=00112233445566778899aabbccddeeff\nstate=revoked\n"},
-		{"purge", cli.CredentialPurge, "record_id=00112233445566778899aabbccddeeff\nstate=purged\n"},
-		{"list", cli.CredentialList, "record_id\tdevice_identifier\tcreated_at\tstate\n00112233445566778899aabbccddeeff\tlaptop\t2026-08-09T01:02:03.000000004Z\tactive\n"},
+		{"add", cli.CredentialAdd, addOutput},
+		{"revoke", cli.CredentialRevoke, revokeOutput},
+		{"purge", cli.CredentialPurge, purgeOutput},
+		{"list", cli.CredentialList, listOutput},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			closed := false

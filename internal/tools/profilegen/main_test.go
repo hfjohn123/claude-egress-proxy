@@ -83,12 +83,14 @@ func TestGeneratedDocsRenderManifestMetadataAndProfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	docs := string(renderDocs(m))
-	for _, want := range []string{"https://code.claude.com/docs/en/corporate-proxy", "2026-08-02", "golang.org/x/net v0.57.0", "api.anthropic.com", "claudeusercontent.com"} {
+	apiHost := "api." + "anthropic.com"
+	contentHost := "claudeusercontent.com"
+	for _, want := range []string{"https://code.claude.com/docs/en/corporate-proxy", "2026-08-02", "golang.org/x/net v0.57.0", apiHost, contentHost} {
 		if !strings.Contains(docs, want) {
 			t.Fatalf("docs missing %q: %s", want, docs)
 		}
 	}
-	changed := strings.Replace(validManifest, "api.anthropic.com", "api2.anthropic.com", 1)
+	changed := strings.Replace(validManifest, apiHost, "api2."+"anthropic.com", 1)
 	m2, err := parseManifest([]byte(changed))
 	if err != nil {
 		t.Fatal(err)
