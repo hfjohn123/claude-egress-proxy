@@ -31,19 +31,28 @@ func TestProductionBinaryE2E(t *testing.T) {
 	runProduct(t, identity, binary, "--config", runtime.configPath, "check", "config")
 	credential := addCredential(t, identity, binary, runtime.configPath, "e2e-client")
 	fixtures := startRuntimeFixtures(t, runtime)
-	server := startProduct(t, identity, binary, append(runtime.forbidden, credential.secret), "--config", runtime.configPath, "serve")
+	server := startProduct(t, identity, binary, diagnosticForbidden(runtime.forbidden, "e2e-client", credential.secret), "--config", runtime.configPath, "serve")
 	waitForHealth(t, identity, binary, "127.0.0.1:9090")
 	if err := fixtures.client.reject(""); err != nil {
 		t.Fatalf("missing-auth CONNECT: %v; product=%s", err, server.output())
 	}
+	if got := fixtures.origin.Connections(); got != 0 {
+		t.Fatalf("missing-auth reached origin %d times", got)
+	}
 	if err := fixtures.client.reject(basicHeader("e2e-client", wrongSecret())); err != nil {
 		t.Fatalf("wrong-auth CONNECT: %v; product=%s", err, server.output())
+	}
+	if got := fixtures.origin.Connections(); got != 0 {
+		t.Fatalf("wrong-auth reached origin %d times", got)
 	}
 	if err := fixtures.client.roundTrip(basicHeader("e2e-client", credential.secret), runtime.sentinel); err != nil {
 		t.Fatalf("authenticated CONNECT: %v; product=%s", err, server.output())
 	}
 	if got := fixtures.origin.Accepted(); got != 1 {
 		t.Fatalf("origin accepted %d requests, want 1", got)
+	}
+	if got := fixtures.origin.Connections(); got != 1 {
+		t.Fatalf("origin received %d connections, want 1", got)
 	}
 	stopGracefully(t, server, 12*time.Second)
 }
@@ -363,4 +372,9 @@ func basicHeader(device, secret string) string {
 
 func wrongSecret() string {
 	return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xa5}, 32))
+}
+
+func diagnosticForbidden(base []string, device, secret string) []string {
+	values := append([]string(nil), base...)
+	return append(values, secret, basicHeader(device, secret), basicHeader(device, wrongSecret()))
 }

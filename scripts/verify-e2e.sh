@@ -43,6 +43,7 @@ cleanup() {
   if [[ ${namespace_created} -eq 1 ]]; then
     mapfile -t pids < <(ip netns pids "${namespace}" 2>/dev/null || true)
     if [[ ${#pids[@]} -gt 0 ]]; then
+      cleanup_failed=1
       kill -TERM "${pids[@]}" 2>/dev/null || true
       for _ in {1..20}; do
         mapfile -t pids < <(ip netns pids "${namespace}" 2>/dev/null || true)

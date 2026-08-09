@@ -23,13 +23,14 @@ import (
 const maxFixtureHTTPBytes = 4096
 
 type originFixture struct {
-	address  string
-	listener net.Listener
-	cancel   context.CancelFunc
-	done     chan struct{}
-	accepted atomic.Uint64
-	close    sync.Once
-	closeErr error
+	address     string
+	listener    net.Listener
+	cancel      context.CancelFunc
+	done        chan struct{}
+	connections atomic.Uint64
+	accepted    atomic.Uint64
+	close       sync.Once
+	closeErr    error
 }
 
 func startOrigin(ctx context.Context, address string, certificate tls.Certificate, sentinel []byte) (*originFixture, error) {
@@ -51,8 +52,9 @@ func startOrigin(ctx context.Context, address string, certificate tls.Certificat
 	return o, nil
 }
 
-func (o *originFixture) Address() string  { return o.address }
-func (o *originFixture) Accepted() uint64 { return o.accepted.Load() }
+func (o *originFixture) Address() string     { return o.address }
+func (o *originFixture) Accepted() uint64    { return o.accepted.Load() }
+func (o *originFixture) Connections() uint64 { return o.connections.Load() }
 
 func (o *originFixture) Close() error {
 	o.close.Do(func() {
@@ -76,6 +78,7 @@ func (o *originFixture) serve(ctx context.Context, sentinel []byte) {
 			}
 			return
 		}
+		o.connections.Add(1)
 		o.handle(connection, sentinel)
 	}
 }
@@ -124,7 +127,7 @@ func (c proxyClient) reject(authHeader string) error {
 	if status != http.StatusProxyAuthRequired {
 		return fmt.Errorf("proxy rejection status %d", status)
 	}
-	return nil
+	return requireServerEOF(reader)
 }
 
 func (c proxyClient) roundTrip(authHeader string, sentinel []byte) error {
@@ -214,6 +217,7 @@ func writeConnect(writer io.Writer, authority, authHeader string) error {
 
 func readConnectStatus(reader *bufio.Reader) (int, error) {
 	used := 0
+	connectionClose := false
 	readLine := func() (string, error) {
 		line, err := reader.ReadString('\n')
 		used += len(line)
@@ -243,10 +247,28 @@ func readConnectStatus(reader *bufio.Reader) (int, error) {
 			return 0, err
 		}
 		if line == "\r\n" {
+			if status == http.StatusProxyAuthRequired && !connectionClose {
+				return 0, errors.New("proxy rejection did not require connection close")
+			}
 			return status, nil
 		}
-		if !strings.Contains(line, ":") {
+		name, value, ok := strings.Cut(strings.TrimSuffix(line, "\r\n"), ":")
+		if !ok {
 			return 0, errors.New("invalid CONNECT header")
 		}
+		if strings.EqualFold(name, "Connection") && strings.EqualFold(strings.TrimSpace(value), "close") {
+			connectionClose = true
+		}
 	}
+}
+
+func requireServerEOF(reader *bufio.Reader) error {
+	remainder, err := io.ReadAll(io.LimitReader(reader, maxFixtureHTTPBytes+1))
+	if err != nil {
+		return errors.New("proxy rejection connection remained open")
+	}
+	if len(remainder) > maxFixtureHTTPBytes {
+		return errors.New("proxy rejection response too large")
+	}
+	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ func TestReadConnectStatusAcceptsOnlyClosedHTTP11Responses(t *testing.T) {
 		wantErr bool
 	}{
 		{"authentication required", "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", http.StatusProxyAuthRequired, false},
+		{"authentication remains open", "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n", 0, true},
 		{"established", "HTTP/1.1 200 Connection Established\r\n\r\n", http.StatusOK, false},
 		{"wrong protocol", "HTTP/1.0 200 Connection Established\r\n\r\n", 0, true},
 		{"unexpected status", "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n", 0, true},
@@ -34,6 +36,33 @@ func TestReadConnectStatusAcceptsOnlyClosedHTTP11Responses(t *testing.T) {
 				t.Fatalf("status = %d, err = %v; want %d, error=%v", got, err, test.want, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestRequireServerEOFRejectsOpenConnection(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	if err := client.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = io.WriteString(server, "still-open") }()
+	if err := requireServerEOF(bufio.NewReader(client)); err == nil {
+		t.Fatal("open rejection connection was accepted")
+	}
+	if err := requireServerEOF(bufio.NewReader(strings.NewReader("closed-body"))); err != nil {
+		t.Fatalf("closed rejection response: %v", err)
+	}
+}
+
+func TestDiagnosticForbiddenIncludesEncodedAuthorization(t *testing.T) {
+	secret := strings.Repeat("A", 43)
+	validHeader := basicHeader("e2e-client", secret)
+	wrongHeader := basicHeader("e2e-client", wrongSecret())
+	forbidden := diagnosticForbidden([]string{"private-key"}, "e2e-client", secret)
+	got := redact(validHeader+" "+wrongHeader+" private-key", forbidden...)
+	if strings.Contains(got, validHeader) || strings.Contains(got, wrongHeader) || strings.Contains(got, "private-key") {
+		t.Fatalf("diagnostic retained forbidden data: %q", got)
 	}
 }
 
@@ -91,5 +120,8 @@ func TestOriginExchangeRequiresExactSentinel(t *testing.T) {
 	}
 	if got := origin.Accepted(); got != 1 {
 		t.Fatalf("accepted requests = %d, want 1", got)
+	}
+	if got := origin.Connections(); got != 2 {
+		t.Fatalf("origin connections = %d, want 2", got)
 	}
 }
