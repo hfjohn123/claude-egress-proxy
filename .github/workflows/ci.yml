@@ -16,10 +16,10 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: '1.26.5'
           check-latest: true
@@ -55,7 +55,7 @@ jobs:
           pwsh -NoProfile -File scripts/verify-generated.ps1
           pwsh -NoProfile -File scripts/verify-public-data.ps1
           go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: test-${{ matrix.os }}
           path: out
@@ -65,10 +65,10 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: '1.26.5'
       - shell: pwsh
@@ -77,7 +77,7 @@ jobs:
         run: mkdir -p out && docker buildx build --load --tag claude-egress-proxy:ci -f deploy/docker/Dockerfile . && docker save --output out/ci-image.tar claude-egress-proxy:ci
       - shell: pwsh
         run: pwsh -NoProfile -File scripts/verify-container.ps1 -Archive out/ci-image.tar -ReportDirectory out/container-scan -SourceCommit '${{ github.sha }}' -Platform linux/amd64
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: container-scan
           path: out/container-scan
