@@ -45,7 +45,7 @@ func TestWorkflowPolicy(t *testing.T) {
 		"provenance.intoto.jsonl",
 		"--sbom=true",
 		"--provenance=mode=max",
-		"attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2",
+		"attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8",
 		"release-evidence",
 	)
 	if strings.Contains(ci+release, "RequestURI") {
