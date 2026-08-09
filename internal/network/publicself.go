@@ -21,6 +21,8 @@ type PublicSelf struct {
 	mu          sync.Mutex
 	snapshot    PublicSelfSnapshot
 	lastRefresh time.Time
+	refreshing  bool
+	refreshDone chan struct{}
 }
 
 type PublicSelfMode uint8
@@ -46,19 +48,43 @@ func (p *PublicSelf) Snapshot() PublicSelfSnapshot {
 }
 
 func (p *PublicSelf) Refresh(ctx context.Context) PublicSelfSnapshot {
+	return p.refresh(ctx, false)
+}
+
+func (p *PublicSelf) refresh(ctx context.Context, onlyIfDue bool) PublicSelfSnapshot {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	addresses := append([]netip.Addr(nil), p.configured...)
+	if onlyIfDue && !p.lastRefresh.IsZero() && p.now().Sub(p.lastRefresh) < 30*time.Second {
+		s := cloneSnapshot(p.snapshot)
+		p.mu.Unlock()
+		return s
+	}
+	if p.refreshing {
+		done := p.refreshDone
+		p.mu.Unlock()
+		select {
+		case <-done:
+			return p.Snapshot()
+		case <-ctx.Done():
+			return p.Snapshot()
+		}
+	}
+	p.refreshing = true
+	p.refreshDone = make(chan struct{})
+	configured := append([]netip.Addr(nil), p.configured...)
+	resolver, host, mode := p.resolver, p.host, p.mode
+	p.mu.Unlock()
+
+	addresses := configured
 	var err error
-	if p.mode != PublicSelfLoopback && p.resolver != nil && p.host != "" {
+	if mode != PublicSelfLoopback && resolver != nil && host != "" {
 		var resolved []netip.Addr
-		resolved, err = p.resolver.LookupA(ctx, p.host)
+		resolved, err = resolver.LookupA(ctx, host)
 		addresses = append(addresses, resolved...)
 	}
-	s := PublicSelfSnapshot{Generation: p.snapshot.Generation + 1, ObservedAt: p.now(), Coverage: "configured_and_resolved"}
+	s := PublicSelfSnapshot{ObservedAt: p.now(), Coverage: "configured_and_resolved"}
 	if err != nil || len(addresses) > 64 {
 		s.Outcome = publicSelfOutcome("failure")
-	} else if p.mode == PublicSelfLoopback {
+	} else if mode == PublicSelfLoopback {
 		s.Outcome = publicSelfOutcome("success_empty")
 	} else {
 		seen := make(map[netip.Addr]struct{}, len(addresses))
@@ -78,21 +104,22 @@ func (p *PublicSelf) Refresh(ctx context.Context) PublicSelfSnapshot {
 			s.Outcome = publicSelfOutcome("positive")
 		}
 	}
+	p.mu.Lock()
+	// A single owner is the only writer, but calculate generation while holding
+	// the publication lock so snapshots remain strictly monotonic.
+	s.Generation = p.snapshot.Generation + 1
 	p.snapshot = s
 	p.lastRefresh = s.ObservedAt
+	p.refreshing = false
+	close(p.refreshDone)
+	p.refreshDone = nil
+	p.mu.Unlock()
 	return cloneSnapshot(s)
 }
 
 // RefreshIfDue avoids ambient refresh storms; callers share the one owner.
 func (p *PublicSelf) RefreshIfDue(ctx context.Context) PublicSelfSnapshot {
-	p.mu.Lock()
-	if !p.lastRefresh.IsZero() && p.now().Sub(p.lastRefresh) < 30*time.Second {
-		s := cloneSnapshot(p.snapshot)
-		p.mu.Unlock()
-		return s
-	}
-	p.mu.Unlock()
-	return p.Refresh(ctx)
+	return p.refresh(ctx, true)
 }
 
 func publicSelfOutcome(value string) contract.PublicSelfOutcome {

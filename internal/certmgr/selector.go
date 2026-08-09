@@ -1,9 +1,11 @@
 package certmgr
 
 import (
+	"crypto"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"reflect"
 	"time"
 )
 
@@ -80,7 +82,7 @@ func validateMaterial(c tls.Certificate, hostname string, now time.Time) (*mater
 		chain[i] = parsed
 	}
 	leaf := chain[0]
-	if !exactDNSName(leaf, hostname) || now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
+	if !exactDNSName(leaf, hostname) || now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) || !certificateMatchesKey(leaf, c.PrivateKey) || !validChain(chain, now) {
 		return nil, errNoCertificate
 	}
 	cloned, err := cloneCertificate(c)
@@ -88,6 +90,32 @@ func validateMaterial(c tls.Certificate, hostname string, now time.Time) (*mater
 		return nil, errNoCertificate
 	}
 	return &material{certificate: cloned, notBefore: leaf.NotBefore, notAfter: leaf.NotAfter}, nil
+}
+
+func certificateMatchesKey(leaf *x509.Certificate, privateKey any) bool {
+	if leaf == nil || privateKey == nil {
+		return false
+	}
+	key, ok := privateKey.(crypto.Signer)
+	return ok && reflect.DeepEqual(leaf.PublicKey, key.Public())
+}
+
+// validChain verifies every supplied issuer link. A sole leaf is permitted:
+// deployments commonly omit a trust anchor from the presented TLS chain.
+func validChain(chain []*x509.Certificate, now time.Time) bool {
+	for i, child := range chain {
+		if child == nil || now.Before(child.NotBefore) || !now.Before(child.NotAfter) {
+			return false
+		}
+		if i+1 == len(chain) {
+			continue
+		}
+		issuer := chain[i+1]
+		if !issuer.IsCA || !issuer.BasicConstraintsValid || child.CheckSignatureFrom(issuer) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneCertificate(c tls.Certificate) (tls.Certificate, error) {

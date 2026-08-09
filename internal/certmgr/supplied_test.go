@@ -1,6 +1,7 @@
 package certmgr
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -8,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/hfjohn123/claude-egress-proxy/internal/timebase"
 )
 
 func TestSuppliedReloadKeepsLastValidCertificate(t *testing.T) {
@@ -41,6 +44,21 @@ func TestSuppliedRejectsExpiredInitialCertificate(t *testing.T) {
 	writePair(t, certPath, keyPath, testCertificate(t, "proxy.example.com", now.Add(-2*time.Hour), now.Add(-time.Nanosecond)))
 	if _, err := NewSupplied(SuppliedConfig{Hostname: "proxy.example.com", CertificateFile: certPath, PrivateKeyFile: keyPath, Now: func() time.Time { return now }}); err == nil {
 		t.Fatal("accepted expired certificate")
+	}
+}
+
+func TestSuppliedStartIsIdempotent(t *testing.T) {
+	m := &Supplied{Manager: New("proxy.example.com", time.Now), clock: timebase.Real{}}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !m.started.Load() {
+		t.Fatal("poller did not start")
 	}
 }
 

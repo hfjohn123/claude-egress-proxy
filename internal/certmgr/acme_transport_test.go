@@ -57,6 +57,31 @@ func TestDirectTransportDialsValidatedLiteralWithoutProxy(t *testing.T) {
 	}
 }
 
+func TestDirectTransportRequiresFreshPositivePublicSelfWhenConfigured(t *testing.T) {
+	called := false
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	transport, err := NewDirectTransport(DirectTransportConfig{
+		DirectoryURL: "https://ca.example/directory",
+		PublicSelf: func() network.PublicSelfSnapshot {
+			return network.PublicSelfSnapshot{ObservedAt: now.Add(-6 * time.Second)}
+		},
+		Now: func() time.Time { return now },
+		Resolver: network.LookupFunc(func(context.Context, string) ([]netip.Addr, error) {
+			called = true
+			return []netip.Addr{netip.MustParseAddr("203.0.113.7")}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.DialContext(t.Context(), "tcp", "ca.example:443"); !errors.Is(err, errUnsafeACMEEndpoint) {
+		t.Fatalf("dial error = %v", err)
+	}
+	if called {
+		t.Fatal("resolved while public-self gate was stale")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

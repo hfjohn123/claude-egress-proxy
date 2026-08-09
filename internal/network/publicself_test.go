@@ -3,7 +3,9 @@ package network
 import (
 	"context"
 	"net/netip"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestPublicSelfRefreshPublishesCanonicalUnion(t *testing.T) {
@@ -31,5 +33,30 @@ func TestPublicSelfLoopbackModeIsSuccessEmpty(t *testing.T) {
 	p := NewPublicSelfForMode(PublicSelfLoopback, nil, nil, "")
 	if got := p.Refresh(context.Background()); got.Outcome.String() != "success_empty" {
 		t.Fatalf("outcome = %v, want success_empty", got.Outcome)
+	}
+}
+
+func TestPublicSelfRefreshSingleflightsConcurrentCallers(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	p := NewPublicSelf(nil, LookupFunc(func(context.Context, string) ([]netip.Addr, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+	}), "self.example")
+	first := make(chan PublicSelfSnapshot, 1)
+	second := make(chan PublicSelfSnapshot, 1)
+	go func() { first <- p.Refresh(t.Context()) }()
+	<-started
+	go func() { second <- p.Refresh(t.Context()) }()
+	time.Sleep(10 * time.Millisecond) // second caller reaches the in-flight gate
+	close(release)
+	<-first
+	<-second
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("resolver calls = %d, want one", got)
 	}
 }

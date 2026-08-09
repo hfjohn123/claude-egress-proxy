@@ -21,6 +21,7 @@ const (
 )
 
 var errUnsafeACMEEndpoint = errors.New("unsafe acme endpoint")
+var errACMEBodyLimit = errors.New("acme response body limit")
 
 // DirectTransportConfig contains the only dependencies used for CA traffic.
 // Resolver and Dial are injectable so ACME never inherits ambient proxy or DNS state.
@@ -29,6 +30,10 @@ type DirectTransportConfig struct {
 	Resolver     network.Resolver
 	Dial         func(context.Context, string, string, netip.Addr) (net.Conn, error)
 	RootCAs      *x509.CertPool
+	// PublicSelf, when supplied, must return a fresh positive snapshot before
+	// the CA endpoint may be resolved or dialed.
+	PublicSelf func() network.PublicSelfSnapshot
+	Now        func() time.Time
 }
 
 // NewDirectTransport returns a proxy-free, literal-dialing ACME transport.
@@ -49,6 +54,16 @@ func NewDirectTransport(config DirectTransportConfig) (*http.Transport, error) {
 	return &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, networkName, address string) (net.Conn, error) {
+			if config.PublicSelf != nil {
+				now := time.Now()
+				if config.Now != nil {
+					now = config.Now()
+				}
+				snapshot := config.PublicSelf()
+				if snapshot.Outcome.String() != "positive" || snapshot.ObservedAt.Before(now.Add(-5*time.Second)) || snapshot.ObservedAt.After(now.Add(time.Second)) {
+					return nil, errUnsafeACMEEndpoint
+				}
+			}
 			host, port, err := net.SplitHostPort(address)
 			if err != nil {
 				return nil, err

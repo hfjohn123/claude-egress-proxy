@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
@@ -34,6 +35,7 @@ type Supplied struct {
 	filePolicy                      securefs.FilePolicy
 	mu                              sync.Mutex
 	failed                          bool
+	started                         atomic.Bool
 }
 
 func NewSupplied(config SuppliedConfig) (*Supplied, error) {
@@ -103,6 +105,9 @@ func readSuppliedPair(certPath, keyPath string, rootPolicy securefs.RootPolicy, 
 func (m *Supplied) Start(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("nil context")
+	}
+	if !m.started.CompareAndSwap(false, true) {
+		return nil
 	}
 	go func() {
 		ticker := m.clock.NewTicker(5 * time.Second)

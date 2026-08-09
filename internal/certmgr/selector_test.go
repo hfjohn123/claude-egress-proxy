@@ -89,6 +89,29 @@ func TestSelectCertificateTimeBoundary(t *testing.T) {
 	}
 }
 
+func TestInstallServingRejectsUnvalidatedChainAndMismatchedKey(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	valid := testCertificate(t, "proxy.example.com", now.Add(-time.Hour), now.Add(time.Hour))
+	m := New("proxy.example.com", func() time.Time { return now })
+
+	// Repeating a non-CA leaf parses, but is not a valid issuer chain.
+	invalidChain := valid
+	invalidChain.Certificate = append(append([][]byte(nil), valid.Certificate...), valid.Certificate[0])
+	if err := m.InstallServing(invalidChain); err == nil {
+		t.Fatal("accepted invalid certificate chain")
+	}
+
+	wrongKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatchedKey := valid
+	mismatchedKey.PrivateKey = wrongKey
+	if err := m.InstallServing(mismatchedKey); err == nil {
+		t.Fatal("accepted mismatched private key")
+	}
+}
+
 func TestRealTLSHandshakeNegotiatesOnlyHTTP1(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 	m := New("proxy.example.com", func() time.Time { return now })
