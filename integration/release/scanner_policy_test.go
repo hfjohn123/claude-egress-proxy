@@ -2,6 +2,10 @@ package release_test
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -38,4 +42,47 @@ func TestScannerPolicy(t *testing.T) {
 	requireAll(t, secrets, "gitleaks", "--log-opts=--all", "dir", "--redact=100", "safe.directory")
 	container := read(t, "scripts/verify-container.ps1")
 	requireAll(t, container, "oci-archive:", "--fail-on", "high", "db", "update", "24", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev", "GRYPE_DB_CACHE_DIR=/grype-db", "volume", "create", "rm")
+}
+
+func TestContainerScanForwardsRequestedPlatformToGrype(t *testing.T) {
+	temp := t.TempDir()
+	logPath := filepath.Join(temp, "docker.log")
+	archivePath := filepath.Join(temp, "image.tar")
+	if err := os.WriteFile(archivePath, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var shimPath, shim string
+	if runtime.GOOS == "windows" {
+		shimPath = filepath.Join(temp, "docker.cmd")
+		shim = "@echo off\r\necho %*>>\"%DOCKER_LOG%\"\r\necho %* | findstr /c:\"oci-archive:/image.tar\" >nul && echo {}\r\nexit /b 0\r\n"
+	} else {
+		shimPath = filepath.Join(temp, "docker")
+		shim = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"\ncase \" $* \" in *\"oci-archive:/image.tar\"*) printf '{}\\n';; esac\n"
+	}
+	if err := os.WriteFile(shimPath, []byte(shim), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath, err := filepath.Abs(filepath.Join("..", "..", "scripts", "verify-container.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("pwsh", "-NoProfile", "-File", scriptPath,
+		"-Archive", archivePath,
+		"-ReportDirectory", filepath.Join(temp, "report"),
+		"-SourceCommit", "test-commit",
+		"-Platform", "linux/arm64",
+	)
+	cmd.Env = append(os.Environ(), "DOCKER_LOG="+logPath, "PATH="+temp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("verify-container.ps1 failed: %v\n%s", err, output)
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "--platform linux/arm64") {
+		t.Fatalf("Grype invocation did not receive requested platform:\n%s", got)
+	}
 }
