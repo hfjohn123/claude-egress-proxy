@@ -1,0 +1,99 @@
+name: Draft release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491
+        with: { go-version: '1.26.5' }
+      - shell: pwsh
+        run: pwsh -NoProfile -File scripts/verify-secrets.ps1
+
+  build-binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491
+        with: { go-version: '1.26.5' }
+      - name: four reproducible targets
+        run: |
+          mkdir -p out/release
+          # target windows/amd64
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o out/release/claude-egress-proxy-windows-amd64.exe ./cmd/claude-egress-proxy
+          # target windows/arm64
+          GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o out/release/claude-egress-proxy-windows-arm64.exe ./cmd/claude-egress-proxy
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o out/release/claude-egress-proxy-linux-amd64 ./cmd/claude-egress-proxy
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o out/release/claude-egress-proxy-linux-arm64 ./cmd/claude-egress-proxy
+          sha256sum out/release/* > out/release/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: { name: release-binaries, path: out/release, retention-days: 14 }
+
+  build-linux-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { fetch-depth: 0 }
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - run: docker buildx build --platform linux/amd64 --output type=oci,dest=out/linux-amd64.tar -f deploy/docker/Dockerfile .
+      - shell: pwsh
+        run: pwsh -NoProfile -File scripts/verify-container.ps1 -Archive out/linux-amd64.tar -ReportDirectory out/scan-amd64 -SourceCommit '${{ github.sha }}' -Platform linux/amd64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: { name: image-amd64, path: out, retention-days: 14 }
+
+  build-linux-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { fetch-depth: 0 }
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - run: docker buildx build --platform linux/arm64 --output type=oci,dest=out/linux-arm64.tar -f deploy/docker/Dockerfile .
+      - shell: pwsh
+        run: pwsh -NoProfile -File scripts/verify-container.ps1 -Archive out/linux-arm64.tar -ReportDirectory out/scan-arm64 -SourceCommit '${{ github.sha }}' -Platform linux/arm64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: { name: image-arm64, path: out, retention-days: 14 }
+
+  publish:
+    needs: [secrets, build-linux-amd64, build-linux-arm64]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { fetch-depth: 0 }
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/${{ github.repository }}:${{ inputs.version }}
+
+  draft-release:
+    needs: [publish, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: release-binaries, path: out/release }
+      - uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8
+        with:
+          draft: true
+          generate_release_notes: true
+          tag_name: ${{ inputs.version }}
+          files: out/release/*
