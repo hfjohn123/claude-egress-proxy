@@ -27,7 +27,7 @@ Invoke-CheckedNative docker @('volume', 'create', $cacheVolume)
 $runtime = @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '--tmpfs', '/tmp:rw,noexec,nosuid,nodev', '-e', 'GRYPE_DB_CACHE_DIR=/grype-db', '-v', "${cacheVolume}:/grype-db")
 try {
     Invoke-CheckedNative docker ($runtime + @($image, 'db', 'update'))
-    $scanArgs = $runtime + @('-v', "${archivePath}:/image.tar:ro", $image, 'oci-archive:/image.tar', '--fail-on', 'high', '-o', 'json')
+    $scanArgs = $runtime + @('-v', "${archivePath}:/image.tar:ro", $image, 'oci-archive:/image.tar', '--platform', $Platform, '--fail-on', 'high', '-o', 'json')
     $stderrFile = [IO.Path]::GetTempFileName()
     $scanOutput = & docker @scanArgs 2> $stderrFile
     $scanCode = $LASTEXITCODE
