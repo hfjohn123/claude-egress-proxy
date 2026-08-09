@@ -1,0 +1,31 @@
+format_version: 1
+source_url: https://code.claude.com/docs/en/corporate-proxy
+documentation_date: "2026-08-02"
+public_suffix_module: golang.org/x/net
+public_suffix_version: v0.57.0
+profiles:
+  code:
+    exact_hosts:
+      - api.anthropic.com
+      - bridge.claudeusercontent.com
+      - claude.ai
+      - claude.com
+      - code.claude.com
+      - downloads.claude.ai
+      - mcp-proxy.anthropic.com
+      - platform.claude.com
+    suffixes: []
+  web-desktop:
+    exact_hosts:
+      - api.anthropic.com
+      - assets-proxy.anthropic.com
+      - claude.ai
+      - claude.com
+      - mcp-proxy.anthropic.com
+      - platform.claude.com
+    suffixes:
+      - claudeusercontent.com
+  all:
+    union:
+      - code
+      - web-desktop

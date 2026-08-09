@@ -1,0 +1,301 @@
+package securefs
+
+import (
+	"context"
+	"errors"
+	"math"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestCreateFileOnceRequiresCapabilityAndNeverOverwrites(t *testing.T) {
+	parent, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	policy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4}
+	boundary, err := CreateFileOnce(context.Background(), parent, "config", []byte("four"), policy)
+	if err != nil || boundary != (CommitBoundary{NamespacePublished: true, TargetDurable: true}) {
+		t.Fatalf("CreateFileOnce = %+v,%v", boundary, err)
+	}
+	if _, err := CreateFileOnce(context.Background(), parent, "config", []byte("new"), policy); !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("overwrite error = %v", err)
+	}
+	if _, err := CreateFileOnce(context.Background(), parent, "other", []byte("large"), policy); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversize error = %v", err)
+	}
+}
+
+func TestCreateFileOnceTreatsZeroMaxAsZeroBytes(t *testing.T) {
+	parent, err := OpenCreateCapableRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	policy := FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 0}
+	if _, err := CreateFileOnce(context.Background(), parent, "nonempty", []byte("x"), policy); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("zero max nonempty error = %v", err)
+	}
+	if _, err := CreateFileOnce(context.Background(), parent, "empty", nil, policy); err != nil {
+		t.Fatalf("zero max empty = %v", err)
+	}
+}
+
+func TestOrdinaryRootCannotEscalateToCreateCapability(t *testing.T) {
+	root, err := OpenRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if _, ok := root.(CreateCapableRoot); ok {
+		t.Fatal("ordinary OpenRoot returned create capability")
+	}
+}
+
+// TestOpenRootRejectsNonCanonicalAndLinkedParents catches a path preflight that
+// accepts a relative, dot-cleanable, or linked root before opening it securely.
+func TestOpenRootRejectsNonCanonicalAndLinkedParents(t *testing.T) {
+	base := t.TempDir()
+	policy := RootPolicy{Access: IdentityOnlyPermissions()}
+	for _, path := range []string{"relative", base + string(filepath.Separator) + "."} {
+		if _, err := OpenRoot(path, policy); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("OpenRoot(%q) error = %v, want ErrUnsafePath", path, err)
+		}
+	}
+
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(base, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := OpenRoot(link, policy); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("OpenRoot(link) error = %v, want ErrUnsafePath", err)
+	}
+}
+
+// TestOpenRootExcludesFilesystemRoot catches a traversal that starts checking
+// only after the volume/filesystem root and therefore permits root-as-checkout.
+func TestOpenRootExcludesFilesystemRoot(t *testing.T) {
+	filesystemRoot := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
+	checkout, err := OpenRoot(filesystemRoot, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkoutID := checkout.Identity()
+	if err := checkout.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenRoot(t.TempDir(), RootPolicy{Access: IdentityOnlyPermissions(), ExcludedAncestor: checkoutID}); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("OpenRoot below filesystem-root checkout error = %v, want ErrUnsafePath", err)
+	}
+}
+
+// TestRootReadFileBoundedOnValidatedHandle catches a read that reopens by path
+// or accepts a file larger than the policy's sole maximum.
+func TestRootReadFileBoundedOnValidatedHandle(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "secret"), []byte("four"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := OpenRoot(dir, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	_, _, err = root.ReadFile("secret", FilePolicy{Presence: Required, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 3})
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("ReadFile oversized error = %v, want ErrTooLarge", err)
+	}
+	got, state, err := root.ReadFile("secret", FilePolicy{Presence: Required, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "four" || !state.Present || state.Size != 4 || state.Identity == (Identity{}) {
+		t.Fatalf("ReadFile = (%q, %+v), want validated file metadata", got, state)
+	}
+}
+
+// TestBoundedReadChunkNeverExceedsOverflowProbe catches a read loop that asks
+// the OS for an ambient buffer (for example 32 KiB) after a MaxBytes policy.
+func TestBoundedReadChunkNeverExceedsOverflowProbe(t *testing.T) {
+	for _, test := range []struct {
+		max, used int64
+		want      int
+	}{
+		{max: 3, used: 0, want: 4},
+		{max: 3, used: 3, want: 1},
+		{max: 3, used: 4, want: 0},
+		{max: 0, used: 0, want: 32 * 1024},
+		{max: math.MaxInt64, used: 0, want: 32 * 1024},
+		{max: math.MaxInt64, used: math.MaxInt64 - 1, want: 2},
+		{max: math.MaxInt64, used: math.MaxInt64, want: 1},
+	} {
+		if got := boundedReadChunk(test.max, test.used, 32*1024); got != test.want {
+			t.Fatalf("boundedReadChunk(%d, %d) = %d, want %d", test.max, test.used, got, test.want)
+		}
+	}
+}
+
+// TestRootOptionalAbsenceAndMustBeAbsent catches treating unsafe/missing final
+// members as interchangeable and catches a present output being accepted.
+func TestRootOptionalAbsenceAndMustBeAbsent(t *testing.T) {
+	dir := t.TempDir()
+	root, err := OpenRoot(dir, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	state, err := root.Inspect("missing", FilePolicy{Presence: Optional, Kind: RegularFile, Access: IdentityOnlyPermissions()})
+	if err != nil || state.Present || state.Identity != (Identity{}) {
+		t.Fatalf("optional missing = (%+v, %v), want safely absent", state, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "present"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = root.Inspect("present", FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions()})
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("MustBeAbsent error = %v, want ErrAlreadyExists", err)
+	}
+}
+
+// TestRootPinnedIdentityAndClose catches a root that silently follows a
+// replacement and one that uses retained handles after Close.
+func TestRootPinnedIdentityAndClose(t *testing.T) {
+	base := t.TempDir()
+	path := filepath.Join(base, "root")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := OpenRoot(path, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := root.Identity()
+	if err := os.Remove(path); err != nil {
+		root.Close()
+		t.Skipf("cannot replace open root on this filesystem: %v", err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.RecheckIdentity(); !errors.Is(err, ErrIdentityChanged) {
+		t.Fatalf("RecheckIdentity error = %v, want ErrIdentityChanged", err)
+	}
+	if root.Identity() != first {
+		t.Fatal("pinned identity changed")
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.RecheckIdentity(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("RecheckIdentity after Close = %v, want ErrClosed", err)
+	}
+}
+
+// TestValidateOutputExcludesCheckoutAndRetainsParent catches a preflight that
+// either permits an output below checkout or drops the validated parent handle.
+func TestValidateOutputExcludesCheckoutAndRetainsParent(t *testing.T) {
+	base := t.TempDir()
+	checkout, err := OpenRoot(base, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkoutID := checkout.Identity()
+	if err := checkout.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, err = ValidateOutput(filepath.Join(base, "out"), checkoutID,
+		RootPolicy{Access: IdentityOnlyPermissions()},
+		FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions()})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("ValidateOutput below checkout error = %v, want ErrUnsafePath", err)
+	}
+
+	outside := t.TempDir()
+	parent, name, state, err := ValidateOutput(filepath.Join(outside, "out"), Identity{},
+		RootPolicy{Access: IdentityOnlyPermissions()},
+		FilePolicy{Presence: MustBeAbsent, Kind: RegularFile, Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	if name != "out" || state.Present {
+		t.Fatalf("ValidateOutput = (%q, %+v), want retained absent parent", name, state)
+	}
+	if err := parent.RecheckIdentity(); err != nil {
+		t.Fatalf("returned parent is not usable: %v", err)
+	}
+}
+
+// TestCreateRootCreatesExactlyOneRestrictedLeaf catches a creation helper that
+// follows paths or creates intermediate directories instead of one leaf.
+func TestCreateRootCreatesExactlyOneRestrictedLeaf(t *testing.T) {
+	base := t.TempDir()
+	parent, err := OpenCreateCapableRoot(base, RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	created, err := CreateRoot(parent, "state", RootPolicy{Access: IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer created.Close()
+	if created.Identity() == (Identity{}) {
+		t.Fatal("created root has zero identity")
+	}
+	if _, err := CreateRoot(parent, "state", RootPolicy{Access: IdentityOnlyPermissions()}); !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("CreateRoot existing leaf error = %v, want ErrAlreadyExists", err)
+	}
+	if _, err := CreateRoot(parent, "nested/state", RootPolicy{Access: IdentityOnlyPermissions()}); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("CreateRoot nested leaf error = %v, want ErrUnsafePath", err)
+	}
+}
+
+type blockingRootOps struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingRootOps) identity() Identity                            { return Identity{platform: 99} }
+func (b *blockingRootOps) recheck() error                                { close(b.started); <-b.release; return nil }
+func (b *blockingRootOps) inspect(string, FilePolicy) (FileState, error) { return FileState{}, nil }
+func (b *blockingRootOps) readFile(string, FilePolicy) ([]byte, FileState, error) {
+	return nil, FileState{}, nil
+}
+func (b *blockingRootOps) close() error { return nil }
+
+// TestCloseWaitsForInFlightOperation catches Close releasing handles while a
+// recheck is still using them, and verifies the closed state afterwards.
+func TestCloseWaitsForInFlightOperation(t *testing.T) {
+	ops := &blockingRootOps{started: make(chan struct{}), release: make(chan struct{})}
+	r := &root{op: ops}
+	doneRecheck := make(chan error, 1)
+	go func() { doneRecheck <- r.RecheckIdentity() }()
+	<-ops.started
+	doneClose := make(chan error, 1)
+	go func() { doneClose <- r.Close() }()
+	select {
+	case err := <-doneClose:
+		t.Fatalf("Close returned before in-flight recheck: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(ops.release)
+	if err := <-doneRecheck; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-doneClose; err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RecheckIdentity(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("post-close recheck = %v, want ErrClosed", err)
+	}
+}

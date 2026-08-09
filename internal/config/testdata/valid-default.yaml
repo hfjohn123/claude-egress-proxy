@@ -1,0 +1,6 @@
+format_version: 1
+instance_id: 000102030405060708090a0b0c0d0e0f
+state_root: /var/lib/claude-egress-proxy
+tls:
+  mode: acme
+  hostname: proxy.example.com

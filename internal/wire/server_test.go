@@ -1,0 +1,206 @@
+package wire
+
+import (
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+type ownerConn struct {
+	net.Conn
+	releases int
+}
+
+func (c *ownerConn) Release() bool { c.releases++; return c.releases == 1 }
+
+func TestServerHasBoundedHTTP1OwnerBridge(t *testing.T) {
+	s := NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	if s.ReadHeaderTimeout != 10*time.Second || s.WriteTimeout != 10*time.Second || s.MaxHeaderBytes != 16<<10 || s.ReadTimeout != 0 || s.IdleTimeout != 0 || !s.DisableGeneralOptionsHandler || s.ErrorLog == nil || !s.Protocols.HTTP1() || s.Protocols.HTTP2() {
+		t.Fatalf("unexpected server %#v", s)
+	}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	c := &ownerConn{Conn: a}
+	r := (&http.Request{}).WithContext(s.ConnContext(context.Background(), c))
+	if got, ok := ConnectionOwner(r); !ok || got != c {
+		t.Fatalf("owner=%v ok=%v", got, ok)
+	}
+	r = (&http.Request{}).WithContext(s.ConnContext(context.Background(), b))
+	if _, ok := ConnectionOwner(r); ok {
+		t.Fatal("unowned connection admitted")
+	}
+	_ = io.Discard
+}
+
+func TestServerAbortsUnownedConnectionWithoutCallingHandler(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	listener := &oneConnListener{conn: server}
+	var calls atomic.Int32
+	s := NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(listener) }()
+	if _, err := io.WriteString(client, "GET / HTTP/1.1\r\nHost: example\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1)
+	if n, err := client.Read(buf); n != 0 || err != io.EOF {
+		t.Fatalf("read %d, %v; want closed without response", n, err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("unowned connection reached supplied handler")
+	}
+	if err := <-done; err == nil {
+		t.Fatal("Serve unexpectedly returned nil")
+	}
+}
+
+func TestServerOwnedLiteralParserMatrix(t *testing.T) {
+	tests := []struct {
+		name, raw      string
+		reach          bool
+		decision       Decision
+		wantRequestURI string
+		wantTarget     TargetForm
+	}{
+		{"http10", "GET / HTTP/1.0\r\n\r\n", true, DecisionHTTPVersionNotSupported, "", 0},
+		{"other minor", "GET / HTTP/1.2\r\nHost: x\r\n\r\n", true, DecisionHTTPVersionNotSupported, "", 0},
+		{"origin", "GET /x HTTP/1.1\r\nHost: x\r\n\r\n", true, DecisionAllow, "", 0},
+		{"authority absent host", "CONNECT x:443 HTTP/1.1\r\n\r\n", true, DecisionAllow, "x:443", TargetAuthority},
+		{"authority conflicting host", "CONNECT x:443 HTTP/1.1\r\nHost: other.example\r\n\r\n", true, DecisionAllow, "x:443", TargetAuthority},
+		{"absolute", "GET http://x/a HTTP/1.1\r\nHost: x\r\n\r\n", true, DecisionAllow, "", 0},
+		{"asterisk", "OPTIONS * HTTP/1.1\r\nHost: x\r\n\r\n", true, DecisionAllow, "", 0},
+		{"content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"expect", "GET / HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"upgrade", "GET / HTTP/1.1\r\nHost: x\r\nConnection: upgrade\r\nUpgrade: x\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"pri", "PRI * HTTP/2.0\r\n\r\n", true, DecisionHTTPVersionNotSupported, "", 0},
+		{"absent host origin", "GET / HTTP/1.1\r\n\r\n", false, 0, "", 0},
+		{"obsolete folding", "GET / HTTP/1.1\r\nHost: x\r\nX-Fold: a\r\n b\r\n\r\n", true, DecisionAllow, "", 0},
+		{"transfer coding", "GET / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"equal content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"cl te", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", true, DecisionBadRequest, "", 0},
+		{"conflicting content length", "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\n", false, 0, "", 0},
+		{"duplicate host", "GET / HTTP/1.1\r\nHost: x\r\nHost: y\r\n\r\n", false, 0, "", 0},
+		{"malformed host", "GET / HTTP/1.1\r\nHost: x y\r\n\r\n", false, 0, "", 0},
+		{"malformed non-host header", "GET / HTTP/1.1\r\nHost: x\r\nBad Header: value\r\n\r\n", false, 0, "", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls, downstream atomic.Int32
+			var gotRequest Request
+			var gotDecision Decision
+			var observed OwnedConn
+			owner := serveOne(t, tt.raw, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if tt.wantRequestURI != "" {
+					r.Host = "poison.invalid:1"
+					r.URL.Host = "poison.invalid:1"
+				}
+				gotRequest, gotDecision = AdaptRequest(r)
+				o, _ := ConnectionOwner(r)
+				observed = o
+				if gotDecision == DecisionAllow {
+					downstream.Add(1)
+				}
+				w.Header().Set("Connection", "close")
+			}))
+			if (calls.Load() == 1) != tt.reach {
+				t.Fatalf("calls=%d reach=%v", calls.Load(), tt.reach)
+			}
+			if tt.reach && (gotDecision != tt.decision || observed != owner) {
+				t.Fatalf("decision=%v owner=%v exact=%v", gotDecision, observed, observed == owner)
+			}
+			if tt.wantRequestURI != "" && (gotRequest.RequestURI != tt.wantRequestURI || gotRequest.Target != tt.wantTarget) {
+				t.Fatalf("requestURI=%q target=%v; want %q, %v", gotRequest.RequestURI, gotRequest.Target, tt.wantRequestURI, tt.wantTarget)
+			}
+			wantDownstream := tt.reach && tt.decision == DecisionAllow
+			if (downstream.Load() == 1) != wantDownstream {
+				t.Fatalf("downstream=%d want=%v", downstream.Load(), wantDownstream)
+			}
+			if owner.releases != 1 {
+				t.Fatalf("releases=%d", owner.releases)
+			}
+		})
+	}
+}
+
+func TestServerClosesAfterOneRequestAndRejectsDuplicateProxyAuthorization(t *testing.T) {
+	raw := "GET /one HTTP/1.1\r\nHost: x\r\nProxy-Authorization: Basic a\r\nProxy-Authorization: Basic b\r\n\r\nGET /two HTTP/1.1\r\nHost: x\r\n\r\n"
+	var calls, downstream atomic.Int32
+	owner := serveOne(t, raw, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, decision := AdaptRequest(r)
+		credential, count := TakeAuthorization(r.Header, "Proxy-Authorization")
+		if decision == DecisionAllow && count <= 1 {
+			downstream.Add(1)
+		}
+		if count != 2 || credential != nil || len(r.Header.Values("Proxy-Authorization")) != 0 {
+			t.Fatalf("count=%d credential=%q header=%v", count, credential, r.Header)
+		}
+	}))
+	if calls.Load() != 1 || downstream.Load() != 0 || owner.releases != 1 {
+		t.Fatalf("calls=%d downstream=%d releases=%d", calls.Load(), downstream.Load(), owner.releases)
+	}
+}
+
+func TestServerFrameworkRejectsOversizedHeader(t *testing.T) {
+	var calls atomic.Int32
+	serveOne(t, "GET / HTTP/1.1\r\nHost: x\r\nX: "+strings.Repeat("a", 40<<10)+"\r\n\r\n", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	if calls.Load() != 0 {
+		t.Fatal("oversized header reached handler")
+	}
+}
+
+type trackedOwnedConn struct {
+	net.Conn
+	releases int
+}
+
+func (c *trackedOwnedConn) Release() bool { c.releases++; return c.releases == 1 }
+func (c *trackedOwnedConn) Close() error  { c.Release(); return c.Conn.Close() }
+
+func serveOne(t *testing.T, raw string, handler http.Handler) *trackedOwnedConn {
+	t.Helper()
+	client, server := net.Pipe()
+	owner := &trackedOwnedConn{Conn: server}
+	listener := &oneConnListener{conn: owner}
+	s := NewServer(handler)
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(listener) }()
+	written := make(chan error, 1)
+	go func() { _, err := io.WriteString(client, raw); written <- err }()
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	_, _ = io.ReadAll(client)
+	if err := <-written; err != nil && !strings.Contains(err.Error(), "closed pipe") {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	<-done
+	return owner
+}
+
+type oneConnListener struct {
+	conn net.Conn
+	used bool
+}
+
+func (l *oneConnListener) Accept() (net.Conn, error) {
+	if l.used {
+		return nil, net.ErrClosed
+	}
+	l.used = true
+	return l.conn, nil
+}
+func (l *oneConnListener) Close() error   { return nil }
+func (l *oneConnListener) Addr() net.Addr { return dummyAddr("one") }
+
+type dummyAddr string
+
+func (a dummyAddr) Network() string { return string(a) }
+func (a dummyAddr) String() string  { return string(a) }

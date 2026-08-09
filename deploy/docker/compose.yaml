@@ -1,0 +1,41 @@
+services:
+  state-init:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/usr/local/bin/claude-egress-proxy-state-init"]
+    restart: "no"
+    volumes:
+      - claude-egress-proxy-state:/var/lib/claude-egress-proxy:rw
+
+  claude-egress-proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    ports:
+      - "443:8443"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_signal: SIGTERM
+    stop_grace_period: 25s
+    depends_on:
+      state-init:
+        condition: service_completed_successfully
+    volumes:
+      - /etc/claude-egress-proxy/config.yaml:/etc/claude-egress-proxy/config.yaml:ro
+      - claude-egress-proxy-state:/var/lib/claude-egress-proxy:rw
+
+volumes:
+  claude-egress-proxy-state:

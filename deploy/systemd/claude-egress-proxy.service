@@ -1,0 +1,30 @@
+[Unit]
+Description=Claude Egress Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claude-egress-proxy
+Group=claude-egress-proxy
+ExecStart=/usr/local/bin/claude-egress-proxy --config /etc/claude-egress-proxy/config.yaml serve
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/claude-egress-proxy
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+StandardOutput=null
+StandardError=journal
+KillSignal=SIGTERM
+TimeoutStopSec=25s
+
+[Install]
+WantedBy=multi-user.target
