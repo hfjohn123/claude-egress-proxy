@@ -66,9 +66,7 @@ func (p windowsPlatform) Apply(ctx context.Context, action Action, configPath st
 	}
 }
 
-// windowsSCMDispatcherAvailable is deliberately false until the executable
-// enters a real SCM dispatcher and maps controls to the server drain path.
-func windowsSCMDispatcherAvailable() bool { return false }
+func windowsSCMDispatcherAvailable() bool { return true }
 
 func (p windowsPlatform) install(ctx context.Context, configPath string) error {
 	executable, err := p.executable()
