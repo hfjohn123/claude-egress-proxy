@@ -1,0 +1,18 @@
+services:
+  claude-egress-proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    ports:
+      - "443:8443"
+    read_only: true
+    cap_drop:
+      - ALL
+    stop_signal: SIGTERM
+    stop_grace_period: 25s
+    volumes:
+      - /etc/claude-egress-proxy/config.yaml:/etc/claude-egress-proxy/config.yaml:ro
+      - claude-egress-proxy-state:/var/lib/claude-egress-proxy:rw
+
+volumes:
+  claude-egress-proxy-state:
