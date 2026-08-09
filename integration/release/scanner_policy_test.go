@@ -37,5 +37,5 @@ func TestScannerPolicy(t *testing.T) {
 	secrets := read(t, "scripts/verify-secrets.ps1")
 	requireAll(t, secrets, "gitleaks", "--log-opts=--all", "dir", "--redact=100", "safe.directory")
 	container := read(t, "scripts/verify-container.ps1")
-	requireAll(t, container, "oci-archive:", "--fail-on", "high", "db", "update", "24")
+	requireAll(t, container, "oci-archive:", "--fail-on", "high", "db", "update", "24", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev", "GRYPE_DB_CACHE_DIR=/grype-db", "volume", "create", "rm")
 }

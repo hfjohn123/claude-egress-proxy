@@ -22,17 +22,23 @@ New-Item -ItemType Directory -Force -Path $ReportDirectory | Out-Null
 $report = Join-Path (Resolve-Path $ReportDirectory) 'grype.json'
 Invoke-CheckedNative docker @('version', '--format', '{{.Server.Version}}')
 Invoke-CheckedNative docker @('pull', $image)
-Invoke-CheckedNative docker @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', $image, 'db', 'update')
-$scanArgs = @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '-v', "${archivePath}:/image.tar:ro", $image, 'oci-archive:/image.tar', '--fail-on', 'high', '-o', 'json')
-$stderrFile = [IO.Path]::GetTempFileName()
-$scanOutput = & docker @scanArgs 2> $stderrFile
-$scanCode = $LASTEXITCODE
-if ($scanCode -ne 0) {
-    $detail = Get-Content -Raw $stderrFile
-    Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
-    throw "docker exited with ${scanCode}: $detail"
+$cacheVolume = 'claude-egress-proxy-grype-' + [Guid]::NewGuid().ToString('N')
+Invoke-CheckedNative docker @('volume', 'create', $cacheVolume)
+$runtime = @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '--tmpfs', '/tmp:rw,noexec,nosuid,nodev', '-e', 'GRYPE_DB_CACHE_DIR=/grype-db', '-v', "${cacheVolume}:/grype-db")
+try {
+    Invoke-CheckedNative docker ($runtime + @($image, 'db', 'update'))
+    $scanArgs = $runtime + @('-v', "${archivePath}:/image.tar:ro", $image, 'oci-archive:/image.tar', '--fail-on', 'high', '-o', 'json')
+    $stderrFile = [IO.Path]::GetTempFileName()
+    $scanOutput = & docker @scanArgs 2> $stderrFile
+    $scanCode = $LASTEXITCODE
+    if ($scanCode -ne 0) {
+        $detail = Get-Content -Raw $stderrFile
+        throw "docker exited with ${scanCode}: $detail"
+    }
+} finally {
+    if ($stderrFile) { Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue }
+    & docker volume rm --force $cacheVolume | Out-Null
 }
-Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
 $scanOutput | Set-Content -Encoding utf8 $report
 $metadata = [ordered]@{ scanner = $image; source_commit = $SourceCommit; platform = $Platform; archive_sha256 = (Get-FileHash -Algorithm SHA256 $archivePath).Hash.ToLowerInvariant(); database_max_age_hours = 24 }
 $metadata | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 (Join-Path $ReportDirectory 'metadata.json')
