@@ -16,6 +16,7 @@ import (
 	"github.com/hfjohn123/claude-egress-proxy/internal/pac"
 	"github.com/hfjohn123/claude-egress-proxy/internal/policy"
 	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
+	"github.com/hfjohn123/claude-egress-proxy/internal/service"
 )
 
 type Result struct {
@@ -227,9 +228,55 @@ func initFailure(code contract.DiagnosticCode) Result {
 func ProductionDependencies() Dependencies {
 	checkout, err := config.CheckoutIdentity()
 	if err != nil {
-		return Dependencies{Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler()}
+		return Dependencies{Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler(), Service: NewServiceHandler()}
 	}
-	return Dependencies{Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Checkout: checkout}), AdminToken: NewAdminTokenHandler(), PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler()}
+	return Dependencies{Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Checkout: checkout}), AdminToken: NewAdminTokenHandler(), PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler(), Service: NewServiceHandler()}
+}
+
+type serviceDependencies struct {
+	defaults func() (config.DefaultPaths, error)
+	platform func() service.Platform
+}
+
+// NewServiceHandler constructs the privileged service command adapter.
+func NewServiceHandler() Handler {
+	return newServiceHandler(serviceDependencies{defaults: config.PlatformDefaults, platform: service.NewPlatform})
+}
+
+func newServiceHandler(deps serviceDependencies) Handler {
+	return func(ctx context.Context, invocation cli.Invocation) Result {
+		if deps.defaults == nil || deps.platform == nil {
+			return initFailure(contract.D010)
+		}
+		path := invocation.ConfigPath
+		if path == "" {
+			defaults, err := deps.defaults()
+			if err != nil {
+				return initFailure(contract.D010)
+			}
+			path = defaults.Config
+		}
+		var action service.Action
+		switch invocation.ServiceAction {
+		case cli.ServiceInstall:
+			action = service.Install
+		case cli.ServiceUninstall:
+			action = service.Uninstall
+		case cli.ServiceStart:
+			action = service.Start
+		case cli.ServiceStop:
+			action = service.Stop
+		default:
+			return initFailure(contract.D003)
+		}
+		if err := service.Execute(ctx, deps.platform(), action, path); err != nil {
+			if errors.Is(err, service.ErrUnsupported) {
+				return initFailure(contract.D010)
+			}
+			return initFailure(contract.D001)
+		}
+		return Result{}
+	}
 }
 
 func NewPACHandler() Handler {

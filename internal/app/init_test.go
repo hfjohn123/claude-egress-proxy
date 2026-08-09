@@ -265,7 +265,10 @@ func TestProductionDependenciesWiresAvailableCommands(t *testing.T) {
 	if d.CheckConfig == nil {
 		t.Fatal("production check-config handler is nil")
 	}
-	if d.Serve != nil || d.Credential != nil || d.CheckHealth != nil || d.CheckNetwork != nil || d.Service != nil {
+	if d.Service == nil {
+		t.Fatal("production service is nil")
+	}
+	if d.Serve != nil || d.Credential != nil || d.CheckHealth != nil || d.CheckNetwork != nil {
 		t.Fatal("later handlers became live")
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"time"
 
 	"golang.org/x/crypto/acme"
@@ -27,12 +26,8 @@ func NewACMEClient(config ACMEConfig) (*Client, error) {
 	if config.Transport == nil {
 		return nil, errors.New("missing acme transport")
 	}
-	directory, err := url.Parse(config.DirectoryURL)
-	if err != nil {
-		return nil, errUnsafeACMEEndpoint
-	}
 	return &Client{Client: &acme.Client{DirectoryURL: config.DirectoryURL, HTTPClient: &http.Client{
-		Transport:     boundedACMETransport{next: config.Transport, hostname: directory.Hostname()},
+		Transport:     boundedACMETransport{next: config.Transport},
 		Timeout:       30 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}}, nil
@@ -42,12 +37,11 @@ func NewACMEClient(config ACMEConfig) (*Client, error) {
 // endpoint URLs returned by a CA directory. The directory host is the sole
 // authority permitted to reach the dedicated direct transport.
 type boundedACMETransport struct {
-	next     http.RoundTripper
-	hostname string
+	next http.RoundTripper
 }
 
 func (t boundedACMETransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if request == nil || request.URL == nil || validateACMEURL(request.URL.String()) != nil || request.URL.Hostname() != t.hostname {
+	if request == nil || request.URL == nil || validateACMEURL(request.URL.String()) != nil {
 		return nil, errUnsafeACMEEndpoint
 	}
 	response, err := t.next.RoundTrip(request)

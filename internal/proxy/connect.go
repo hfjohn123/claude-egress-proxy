@@ -86,6 +86,9 @@ func servePublic(cfg PublicConfig, w http.ResponseWriter, r *http.Request) {
 		handoff.Release()
 		return
 	}
+	// net/http leaves its handler write deadline installed across Hijack.
+	// Clear it before bounded setup so CONNECT tunnels do not inherit 10s.
+	_ = conn.SetDeadline(time.Time{})
 	if conn != owner {
 		_ = conn.Close()
 		handoff.Release()
@@ -98,6 +101,7 @@ func servePublic(cfg PublicConfig, w http.ResponseWriter, r *http.Request) {
 	}
 	reservation, result := cfg.Coordinator.Transfer(handoff)
 	if result.String() != "established" {
+		handoff.Release()
 		_ = writeFrame(rw, wire.FrameServiceUnavailable)
 		_ = conn.Close()
 		return
@@ -135,6 +139,7 @@ func servePublic(cfg PublicConfig, w http.ResponseWriter, r *http.Request) {
 		tunnel.Release(closeFor("write_error"), contract.ByteTotals{})
 		return
 	}
+	_ = conn.SetDeadline(cfg.Clock.Now().Add(contract.V1().Idle))
 	bytes := RelayBuffered(conn, rw.Reader, origin)
 	tunnel.Release(closeFor("client_eof"), contract.ByteTotals{ClientToOrigin: bytes.ClientToOrigin, OriginToClient: bytes.OriginToClient})
 }

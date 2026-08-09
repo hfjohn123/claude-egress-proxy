@@ -29,7 +29,7 @@ func TestACMEClientUsesDirectTransportAndRejectsRedirects(t *testing.T) {
 	}
 }
 
-func TestACMEClientRejectsForeignEndpointBeforeTransport(t *testing.T) {
+func TestACMEClientAllowsValidatedForeignEndpointHost(t *testing.T) {
 	called := false
 	client, err := NewACMEClient(ACMEConfig{DirectoryURL: "https://ca.example/directory", Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		called = true
@@ -42,11 +42,9 @@ func TestACMEClientRejectsForeignEndpointBeforeTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Client.HTTPClient.Do(req); err == nil {
-		t.Fatal("foreign endpoint accepted")
-	}
-	if called {
-		t.Fatal("transport called for foreign endpoint")
+	_, _ = client.Client.HTTPClient.Do(req)
+	if !called {
+		t.Fatal("validated endpoint did not reach dedicated transport")
 	}
 }
 

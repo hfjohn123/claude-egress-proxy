@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/network"
+	"github.com/hfjohn123/claude-egress-proxy/internal/timebase"
 )
 
 const (
@@ -55,7 +56,7 @@ func NewDirectTransport(config DirectTransportConfig) (*http.Transport, error) {
 		Proxy: nil,
 		DialContext: func(ctx context.Context, networkName, address string) (net.Conn, error) {
 			if config.PublicSelf != nil {
-				now := time.Now()
+				now := timebase.Real{}.Now()
 				if config.Now != nil {
 					now = config.Now()
 				}
