@@ -36,6 +36,14 @@ func runWindowsCommand(ctx context.Context, name string, arguments ...string) er
 }
 
 func (p windowsPlatform) Apply(ctx context.Context, action Action, configPath string) error {
+	// A service registered with SCM must enter svc.Run and report status/control
+	// transitions. The executable does not yet provide that dispatcher, so doing
+	// any of these mutations would install a service that cannot be controlled.
+	// Keep the public command boundary inert until the runtime host is wired.
+	if !windowsSCMDispatcherAvailable() {
+		return ErrUnsupported
+	}
+
 	if p.run == nil || p.executable == nil {
 		return ErrUnsupported
 	}
@@ -57,6 +65,10 @@ func (p windowsPlatform) Apply(ctx context.Context, action Action, configPath st
 		return ErrInvalidAction
 	}
 }
+
+// windowsSCMDispatcherAvailable is deliberately false until the executable
+// enters a real SCM dispatcher and maps controls to the server drain path.
+func windowsSCMDispatcherAvailable() bool { return false }
 
 func (p windowsPlatform) install(ctx context.Context, configPath string) error {
 	executable, err := p.executable()

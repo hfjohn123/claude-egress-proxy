@@ -63,3 +63,27 @@ func TestPlatformBoundsUseFixedOverheads(t *testing.T) {
 		t.Fatalf("windows absolute heap = %d", windows.AbsoluteHeap)
 	}
 }
+
+func TestNamedFixturesPreserveReviewedResourcePoints(t *testing.T) {
+	tests := []struct {
+		name string
+		got  Fixture
+		want Fixture
+	}{
+		{"idle", IdleFixture(), Fixture{E0: 1, Et: 1}},
+		{"64 tunnels", Tunnel64Fixture(), Fixture{T: 64, E0: 1, Et: 1}},
+		{"256 tunnels", Tunnel256Fixture(), Fixture{T: 256, E0: 1, Et: 1}},
+		{"full maps", FullMapFixture(), Fixture{E0: 1, Et: 3 * 4096}},
+		{"mixed", MixedFixture(), Fixture{P: 128, Q: 128, T: 128, E0: 1, Et: 8}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.got != test.want {
+				t.Fatalf("fixture = %+v, want %+v", test.got, test.want)
+			}
+			if err := test.got.Validate(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

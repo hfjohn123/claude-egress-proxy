@@ -24,6 +24,24 @@ type Fixture struct {
 	E0, Et  int
 }
 
+// IdleFixture is the clean external-process baseline.
+func IdleFixture() Fixture { return Fixture{E0: 1, Et: 1} }
+
+// Tunnel64Fixture holds the first fixed tunnel resource point.
+func Tunnel64Fixture() Fixture { return Fixture{T: 64, E0: 1, Et: 1} }
+
+// Tunnel256Fixture holds the maximum authenticated tunnel point.
+func Tunnel256Fixture() Fixture { return Fixture{T: contract.V1().GlobalCapacity, E0: 1, Et: 1} }
+
+// FullMapFixture holds the independent three-map saturation point.
+func FullMapFixture() Fixture { return Fixture{E0: 1, Et: 3 * contract.V1().PrefixEntries} }
+
+// MixedFixture holds P=Q=T=128, whose socket formula is 642.
+func MixedFixture() Fixture {
+	limits := contract.V1()
+	return Fixture{P: limits.PreAuthActive, Q: limits.GlobalCapacity / 2, T: limits.GlobalCapacity / 2, E0: 1, Et: 8}
+}
+
 // Validate rejects profiles outside the fixed v1 resource envelope.
 func (f Fixture) Validate() error {
 	limits := contract.V1()
