@@ -227,9 +227,9 @@ func initFailure(code contract.DiagnosticCode) Result {
 func ProductionDependencies() Dependencies {
 	checkout, err := config.CheckoutIdentity()
 	if err != nil {
-		return Dependencies{Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, PAC: NewPACHandler()}
+		return Dependencies{Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler()}
 	}
-	return Dependencies{Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Checkout: checkout}), AdminToken: NewAdminTokenHandler(), PAC: NewPACHandler()}
+	return Dependencies{Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Checkout: checkout}), AdminToken: NewAdminTokenHandler(), PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler()}
 }
 
 func NewPACHandler() Handler {
@@ -238,6 +238,39 @@ func NewPACHandler() Handler {
 		load:       func(path string) (pacLoaded, error) { return config.Load(path, config.ValidatePure) },
 		policyLoad: policy.Load, render: pac.Render, publish: publishPAC,
 	})
+}
+
+type checkConfigDependencies struct {
+	defaults func() (config.DefaultPaths, error)
+	load     func(string) (pacLoaded, error)
+}
+
+// NewCheckConfigHandler validates the selected immutable configuration and
+// releases its retained filesystem handles before returning.
+func NewCheckConfigHandler() Handler {
+	return newCheckConfigHandler(checkConfigDependencies{
+		defaults: config.PlatformDefaults,
+		load:     func(path string) (pacLoaded, error) { return config.Load(path, config.ValidatePure) },
+	})
+}
+
+func newCheckConfigHandler(deps checkConfigDependencies) Handler {
+	return func(_ context.Context, invocation cli.Invocation) Result {
+		path := invocation.ConfigPath
+		if path == "" {
+			defaults, err := deps.defaults()
+			if err != nil {
+				return initFailure(contract.D010)
+			}
+			path = defaults.Config
+		}
+		loaded, err := deps.load(path)
+		if err != nil {
+			return initFailure(configCode(err))
+		}
+		defer loaded.Close()
+		return Result{}
+	}
 }
 
 type pacLoaded interface {

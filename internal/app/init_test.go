@@ -251,7 +251,7 @@ func TestInitRejectsCaseAliasedWindowsDirectoryPoliciesBeforeMutation(t *testing
 	}
 }
 
-func TestProductionDependenciesWiresInitPACAndAdminToken(t *testing.T) {
+func TestProductionDependenciesWiresAvailableCommands(t *testing.T) {
 	d := ProductionDependencies()
 	if d.Init == nil {
 		t.Fatal("production init is nil")
@@ -262,7 +262,10 @@ func TestProductionDependenciesWiresInitPACAndAdminToken(t *testing.T) {
 	if d.AdminToken == nil {
 		t.Fatal("production admin-token handler is nil")
 	}
-	if d.Serve != nil || d.Credential != nil || d.CheckConfig != nil || d.CheckHealth != nil || d.CheckNetwork != nil || d.Service != nil {
+	if d.CheckConfig == nil {
+		t.Fatal("production check-config handler is nil")
+	}
+	if d.Serve != nil || d.Credential != nil || d.CheckHealth != nil || d.CheckNetwork != nil || d.Service != nil {
 		t.Fatal("later handlers became live")
 	}
 }
