@@ -44,7 +44,10 @@ Invoke-CheckedNative go @('test', './internal/credential', '-run=Fuzz', '-fuzz=F
 Invoke-CheckedNative go @('test', './internal/wire', '-run=Fuzz', '-fuzz=FuzzFramingValues', '-fuzztime=30s') | Out-Null
 Invoke-CheckedNative pwsh @('-NoProfile', '-File', 'scripts/verify-public-data.ps1') | Out-Null
 Invoke-CheckedNative pwsh @('-NoProfile', '-File', 'scripts/verify-secrets.ps1') | Out-Null
-Invoke-CheckedNative pwsh @('-NoProfile', '-File', 'scripts/verify-release.ps1') | Out-Null
+$releaseArchive = $env:CEP_RELEASE_ARCHIVE
+if ($releaseArchive) {
+    Invoke-CheckedNative pwsh @('-NoProfile', '-File', 'scripts/verify-release.ps1', '-Archive', $releaseArchive) | Out-Null
+}
 Invoke-CheckedNative go @('run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', './...') | Out-Null
 Invoke-CheckedNative git @('diff', '--check') | Out-Null
 $status = @(Invoke-CheckedNative git @('status', '--short'))

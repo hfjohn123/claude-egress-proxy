@@ -37,12 +37,13 @@ jobs:
       - name: four reproducible targets
         run: |
           mkdir -p out/release
+          LDFLAGS="-X github.com/hfjohn123/claude-egress-proxy/internal/buildinfo.Version=${GITHUB_REF_NAME:-dev} -X github.com/hfjohn123/claude-egress-proxy/internal/buildinfo.Commit=$(git rev-parse HEAD) -X github.com/hfjohn123/claude-egress-proxy/internal/buildinfo.ProfileVersion=v1 -X github.com/hfjohn123/claude-egress-proxy/internal/buildinfo.DocumentationDate=2026-08-02"
           # target windows/amd64
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o out/release/claude-egress-proxy-windows-amd64.exe ./cmd/claude-egress-proxy
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o out/release/claude-egress-proxy-windows-amd64.exe ./cmd/claude-egress-proxy
           # target windows/arm64
-          GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o out/release/claude-egress-proxy-windows-arm64.exe ./cmd/claude-egress-proxy
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o out/release/claude-egress-proxy-linux-amd64 ./cmd/claude-egress-proxy
-          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o out/release/claude-egress-proxy-linux-arm64 ./cmd/claude-egress-proxy
+          GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o out/release/claude-egress-proxy-windows-arm64.exe ./cmd/claude-egress-proxy
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o out/release/claude-egress-proxy-linux-amd64 ./cmd/claude-egress-proxy
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o out/release/claude-egress-proxy-linux-arm64 ./cmd/claude-egress-proxy
           sha256sum out/release/* > out/release/SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with: { name: release-binaries, path: out/release, retention-days: 14 }

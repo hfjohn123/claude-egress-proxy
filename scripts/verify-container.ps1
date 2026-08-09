@@ -23,8 +23,18 @@ $report = Join-Path (Resolve-Path $ReportDirectory) 'grype.json'
 Invoke-CheckedNative docker @('version', '--format', '{{.Server.Version}}')
 Invoke-CheckedNative docker @('pull', $image)
 Invoke-CheckedNative docker @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', $image, 'db', 'update')
-Invoke-CheckedNative docker @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '-v', "$archivePath:/image.tar:ro", $image, 'oci-archive:/image.tar', '--fail-on', 'high', '-o', 'json')
+$scanArgs = @('run', '--rm', '--read-only', '--security-opt', 'no-new-privileges', '-v', "$archivePath:/image.tar:ro", $image, 'oci-archive:/image.tar', '--fail-on', 'high', '-o', 'json')
+$stderrFile = [IO.Path]::GetTempFileName()
+$scanOutput = & docker @scanArgs 2> $stderrFile
+$scanCode = $LASTEXITCODE
+if ($scanCode -ne 0) {
+    $detail = Get-Content -Raw $stderrFile
+    Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+    throw "docker exited with $scanCode: $detail"
+}
+Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+$scanOutput | Set-Content -Encoding utf8 $report
 $metadata = [ordered]@{ scanner = $image; source_commit = $SourceCommit; platform = $Platform; archive_sha256 = (Get-FileHash -Algorithm SHA256 $archivePath).Hash.ToLowerInvariant(); database_max_age_hours = 24 }
 $metadata | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 (Join-Path $ReportDirectory 'metadata.json')
 # Grype emits only a JSON report; matched secret content is never collected here.
-if (-not (Test-Path $report)) { '{}' | Set-Content -NoNewline -Encoding utf8 $report }
+if (-not (Test-Path $report)) { throw 'scanner produced no report' }
