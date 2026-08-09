@@ -34,51 +34,51 @@ func NewPublicHandler(cfg PublicConfig) http.Handler {
 func servePublic(cfg PublicConfig, w http.ResponseWriter, r *http.Request) {
 	req, decision := wire.AdaptRequest(r)
 	if decision == wire.DecisionHTTPVersionNotSupported {
-		writePublic(w, r.Method, wire.FrameHTTPVersionNotSupported)
+		writePublic(w, r, cfg.Coordinator, wire.FrameHTTPVersionNotSupported)
 		return
 	}
 	if decision != wire.DecisionAllow {
-		writePublic(w, r.Method, wire.FrameBadRequest)
+		writePublic(w, r, cfg.Coordinator, wire.FrameBadRequest)
 		return
 	}
 	if req.Target != wire.TargetAuthority || r.Method != http.MethodConnect {
-		writePublic(w, r.Method, wire.FrameMethodNotAllowedConnect)
+		writePublic(w, r, cfg.Coordinator, wire.FrameMethodNotAllowedConnect)
 		return
 	}
 	header, count := wire.TakeAuthorization(r.Header, "Proxy-Authorization")
 	if count != 1 {
-		writePublic(w, r.Method, wire.FrameProxyAuthenticationRequired)
+		writePublic(w, r, cfg.Coordinator, wire.FrameProxyAuthenticationRequired)
 		return
 	}
 	authority, semantic := policy.ParseAuthority([]byte(req.RequestURI))
 	if semantic != policy.SemanticNone || !cfg.Policy.MatchHost(authority.Host()) {
-		writePublic(w, r.Method, wire.FrameForbidden)
+		writePublic(w, r, cfg.Coordinator, wire.FrameForbidden)
 		return
 	}
 	owner, ok := wire.ConnectionOwner(r)
 	if !ok || cfg.Coordinator == nil {
-		writePublic(w, r.Method, wire.FrameInternalError)
+		writePublic(w, r, cfg.Coordinator, wire.FrameInternalError)
 		return
 	}
 	leased, ok := owner.(interface{ PublicLease() admission.PublicLease })
 	if !ok {
-		writePublic(w, r.Method, wire.FrameInternalError)
+		writePublic(w, r, cfg.Coordinator, wire.FrameInternalError)
 		return
 	}
 	attempt, _, result := cfg.Coordinator.Authenticate(header, leased.PublicLease(), publicNow(cfg))
 	if result.String() != "established" {
-		writePublic(w, r.Method, frameFor(result.String()))
+		writePublic(w, r, cfg.Coordinator, frameFor(result.String()))
 		return
 	}
 	handoff, result := cfg.Coordinator.BeginSetup(attempt)
 	if result.String() != "established" {
-		writePublic(w, r.Method, frameFor(result.String()))
+		writePublic(w, r, cfg.Coordinator, frameFor(result.String()))
 		return
 	}
 	h, ok := w.(http.Hijacker)
 	if !ok {
 		handoff.Release()
-		writePublic(w, r.Method, wire.FrameInternalError)
+		writePublic(w, r, cfg.Coordinator, wire.FrameInternalError)
 		return
 	}
 	conn, rw, err := h.Hijack()
@@ -135,20 +135,52 @@ func servePublic(cfg PublicConfig, w http.ResponseWriter, r *http.Request) {
 		tunnel.Release(closeFor("write_error"), contract.ByteTotals{})
 		return
 	}
-	bytes := Relay(conn, origin)
+	bytes := RelayBuffered(conn, rw.Reader, origin)
 	tunnel.Release(closeFor("client_eof"), contract.ByteTotals{ClientToOrigin: bytes.ClientToOrigin, OriginToClient: bytes.OriginToClient})
 }
 
-func writePublic(w http.ResponseWriter, method string, frame wire.Frame) {
+func writePublic(w http.ResponseWriter, r *http.Request, c *session.Coordinator, frame wire.Frame) {
+	if c != nil {
+		if _, owned := wire.ConnectionOwner(r); owned {
+			_ = WriteFixedResponse(w, r, c, frame, nil)
+			return
+		}
+	}
+	status, body := publicFrameStatus(frame)
 	w.Header().Set("Connection", "close")
 	switch frame {
-	case wire.FrameHTTPVersionNotSupported:
-		w.WriteHeader(http.StatusHTTPVersionNotSupported)
 	case wire.FrameMethodNotAllowedConnect:
 		w.Header().Set("Allow", "CONNECT")
-		w.WriteHeader(http.StatusMethodNotAllowed)
+	case wire.FrameProxyAuthenticationRequired:
+		w.Header().Set("Proxy-Authenticate", `Basic realm="claude-egress-proxy"`)
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write([]byte(body))
+	}
+}
+
+func publicFrameStatus(frame wire.Frame) (int, string) {
+	switch frame {
+	case wire.FrameHTTPVersionNotSupported:
+		return http.StatusHTTPVersionNotSupported, "http version not supported\n"
+	case wire.FrameMethodNotAllowedConnect:
+		return http.StatusMethodNotAllowed, "method not allowed\n"
+	case wire.FrameProxyAuthenticationRequired:
+		return http.StatusProxyAuthRequired, "proxy authentication required\n"
+	case wire.FrameForbidden:
+		return http.StatusForbidden, "forbidden\n"
+	case wire.FrameBadGateway:
+		return http.StatusBadGateway, "bad gateway\n"
+	case wire.FrameServiceUnavailable:
+		return http.StatusServiceUnavailable, "service unavailable\n"
+	case wire.FrameGatewayTimeout:
+		return http.StatusGatewayTimeout, "gateway timeout\n"
+	case wire.FrameInternalError:
+		return http.StatusInternalServerError, "internal_error\n"
 	default:
-		w.WriteHeader(http.StatusBadRequest)
+		return http.StatusBadRequest, "bad request\n"
 	}
 }
 func writeFrame(rw *bufio.ReadWriter, frame wire.Frame) error {

@@ -32,7 +32,7 @@ func (l *adminListener) Accept() (net.Conn, error) {
 	if l.Listener == nil {
 		return nil, net.ErrClosed
 	}
-	if address, ok := l.Listener.Addr().(*net.TCPAddr); ok && (address.IP == nil || !address.IP.IsLoopback()) {
+	if !canonicalAdminListener(l.Listener) {
 		return nil, ErrNonLoopbackAdmin
 	}
 	for {
@@ -54,4 +54,19 @@ func (l *adminListener) Accept() (net.Conn, error) {
 		_ = owned.SetWriteDeadline(timebase.Real{}.Now().Add(10 * time.Second))
 		return owned, nil
 	}
+}
+
+func canonicalAdminListener(listener net.Listener) bool {
+	if listener == nil {
+		return false
+	}
+	address, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || address == nil || address.Zone != "" || address.Port < 1 || address.Port > 65535 {
+		return false
+	}
+	ip, ok := netip.AddrFromSlice(address.IP)
+	if !ok {
+		return false
+	}
+	return CanonicalAdminAddress(netip.AddrPortFrom(ip, uint16(address.Port)))
 }

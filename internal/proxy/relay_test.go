@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"net"
 	"testing"
 	"time"
@@ -33,6 +34,25 @@ func TestRelayCopiesOpaqueBytesBothDirections(t *testing.T) {
 		if got.ClientToOrigin != uint64(len("client hello")) || got.OriginToClient != uint64(len("origin bytes")) {
 			t.Fatalf("bytes=%+v", got)
 		}
+	case <-time.After(time.Second):
+		t.Fatal("relay did not stop")
+	}
+}
+
+func TestRelayBufferedDeliversBytesReadBeforeHijack(t *testing.T) {
+	client, tunnel := net.Pipe()
+	origin, upstream := net.Pipe()
+	defer client.Close()
+	defer upstream.Close()
+	done := make(chan RelayResult, 1)
+	go func() { done <- RelayBuffered(tunnel, bytes.NewBufferString("early"), origin) }()
+	buf := make([]byte, len("early"))
+	if _, err := upstream.Read(buf); err != nil || string(buf) != "early" {
+		t.Fatalf("upstream=%q err=%v", buf, err)
+	}
+	_ = client.Close()
+	select {
+	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("relay did not stop")
 	}
