@@ -25,6 +25,9 @@ func TestReadDraftReturnsStableDecodedDefensiveSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if draft.Identity() == (securefs.Identity{}) {
+		t.Fatal("draft has no retained file identity")
+	}
 	if draft.Config().Destination().Profile() != config.ProfileAll {
 		t.Fatalf("profile = %v, want all", draft.Config().Destination().Profile())
 	}

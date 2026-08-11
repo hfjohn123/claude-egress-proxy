@@ -10,10 +10,12 @@ import (
 type Draft struct {
 	config   Config
 	document []byte
+	identity securefs.Identity
 }
 
-func (d Draft) Config() Config   { return cloneConfig(d.config) }
-func (d Draft) Document() []byte { return append([]byte(nil), d.document...) }
+func (d Draft) Config() Config              { return cloneConfig(d.config) }
+func (d Draft) Document() []byte            { return append([]byte(nil), d.document...) }
+func (d Draft) Identity() securefs.Identity { return d.identity }
 
 func ReadDraft(path string) (Draft, error) {
 	access := securefs.IdentityOnlyPermissions()
@@ -43,7 +45,7 @@ func ReadDraft(path string) (Draft, error) {
 		}
 		return Draft{}, typed(ErrSyntax, contract.D002)
 	}
-	return Draft{config: cfg, document: append([]byte(nil), document...)}, nil
+	return Draft{config: cfg, document: append([]byte(nil), document...), identity: state.Identity}, nil
 }
 
 func mapDraftRead(err error) error {

@@ -68,6 +68,10 @@ func newConfigApplyHandler(deps configApplyDependencies) Handler {
 		if err != nil {
 			return configApplyInstalledFailure(err)
 		}
+		if draft.Identity() == current.ConfigIdentity() {
+			_ = current.Close()
+			return configApplyFailure("draft_invalid")
+		}
 		previous := current.Document()
 		if err := deps.validate(current, draft); err != nil {
 			_ = current.Close()

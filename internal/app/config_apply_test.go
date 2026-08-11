@@ -33,6 +33,48 @@ func TestConfigApplyRejectsDraftInInstalledDirectory(t *testing.T) {
 	}
 }
 
+func TestConfigApplyRejectsSameFileThroughHardLink(t *testing.T) {
+	base := t.TempDir()
+	state := filepath.Join(base, "state")
+	installedDir := filepath.Join(base, "installed")
+	draftDir := filepath.Join(base, "draft")
+	for _, path := range []string{state, installedDir, draftDir} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installed := filepath.Join(installedDir, "config.yaml")
+	if err := os.WriteFile(installed, configApplyDocument(state, "code"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	draftPath := filepath.Join(draftDir, "draft.yaml")
+	if err := os.Link(installed, draftPath); err != nil {
+		t.Fatal(err)
+	}
+	p := securefs.IdentityOnlyPermissions()
+	loader := config.Loader{Policies: config.SecurityPolicies{
+		ConfigDirectory: securefs.RootPolicy{Access: p},
+		ConfigFile:      securefs.FilePolicy{Presence: securefs.Required, Kind: securefs.RegularFile, Access: p, MaxBytes: int64(contract.V1().ConfigBytes)},
+		StateDirectory:  securefs.RootPolicy{Access: p},
+		StateFile:       securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, Access: p, MaxBytes: int64(contract.V1().StoreBytes)},
+	}}
+	published := false
+	handler := newConfigApplyHandler(configApplyDependencies{
+		load:      loader.Load,
+		readDraft: config.ReadDraft,
+		validate:  config.ValidateReplacement,
+		publish: func(context.Context, string, []byte) (securefs.CommitBoundary, error) {
+			published = true
+			return securefs.CommitBoundary{}, nil
+		},
+	})
+
+	result := handler(context.Background(), cli.Invocation{ConfigPath: installed, ConfigInput: draftPath})
+	if result.ExitCode != 1 || string(result.Stderr) != "config apply error: draft_invalid\n" || published {
+		t.Fatalf("result=%+v published=%v", result, published)
+	}
+}
+
 func TestConfigApplyStopsBeforePublishOnDraftAndPreflightFailures(t *testing.T) {
 	base, current, draft := configApplyFixture(t)
 	tests := []struct {
