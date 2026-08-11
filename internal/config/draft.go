@@ -1,0 +1,54 @@
+package config
+
+import (
+	"errors"
+
+	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
+	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
+)
+
+type Draft struct {
+	config   Config
+	document []byte
+}
+
+func (d Draft) Config() Config   { return cloneConfig(d.config) }
+func (d Draft) Document() []byte { return append([]byte(nil), d.document...) }
+
+func ReadDraft(path string) (Draft, error) {
+	access := securefs.IdentityOnlyPermissions()
+	filePolicy := securefs.FilePolicy{
+		Presence: securefs.Required,
+		Kind:     securefs.RegularFile,
+		Access:   access,
+		MaxBytes: int64(contract.V1().ConfigBytes),
+	}
+	parent, name, state, err := securefs.ValidateOutput(path, securefs.Identity{}, securefs.RootPolicy{Access: access}, filePolicy)
+	if err != nil {
+		return Draft{}, pathFailure("draft_file", mapDraftRead(err))
+	}
+	defer parent.Close()
+
+	document, readState, err := parent.ReadFile(name, filePolicy)
+	if err != nil {
+		return Draft{}, pathFailure("draft_file", mapDraftRead(err))
+	}
+	if readState.Identity != state.Identity {
+		return Draft{}, pathFailure("draft_file", typed(ErrPathSecurity, contract.D004))
+	}
+	cfg, err := Decode(document)
+	if err != nil {
+		if errors.Is(err, ErrValue) {
+			return Draft{}, typed(ErrValue, contract.D003)
+		}
+		return Draft{}, typed(ErrSyntax, contract.D002)
+	}
+	return Draft{config: cfg, document: append([]byte(nil), document...)}, nil
+}
+
+func mapDraftRead(err error) error {
+	if errors.Is(err, securefs.ErrUnsupportedInspection) {
+		return typed(ErrPlatform, contract.D010)
+	}
+	return typed(ErrPathSecurity, contract.D004)
+}
