@@ -32,22 +32,40 @@ var (
 	ErrImmutable             = errors.New("immutable configuration field changed")
 )
 
+type PathStage string
+
+const (
+	PathStageConfigDirectory PathStage = "config_directory"
+	PathStageConfigFile      PathStage = "config_file"
+	PathStageStateDirectory  PathStage = "state_directory"
+	PathStageDraftFile       PathStage = "draft_file"
+)
+
+func IsInstalledPathStage(stage PathStage) bool {
+	switch stage {
+	case PathStageConfigDirectory, PathStageConfigFile, PathStageStateDirectory:
+		return true
+	default:
+		return false
+	}
+}
+
 type pathStageError struct {
-	stage string
+	stage PathStage
 	err   error
 }
 
 func (e pathStageError) Error() string { return e.err.Error() }
 func (e pathStageError) Unwrap() error { return e.err }
 
-func pathFailure(stage string, err error) error {
+func pathFailure(stage PathStage, err error) error {
 	if err == nil {
 		return nil
 	}
 	return pathStageError{stage: stage, err: err}
 }
 
-func PathStageOf(err error) (string, bool) {
+func PathStageOf(err error) (PathStage, bool) {
 	var staged pathStageError
 	if !errors.As(err, &staged) {
 		return "", false
@@ -93,9 +111,17 @@ type Loaded struct {
 }
 type borrowedRoot struct{ owner *Loaded }
 
-func (l *Loaded) Config() Config                       { l.mu.RLock(); defer l.mu.RUnlock(); return cloneConfig(l.config) }
-func (l *Loaded) ConfigPath() string                   { return l.configPath }
-func (l *Loaded) ConfigIdentity() securefs.Identity    { return l.configIdentity }
+func (l *Loaded) Config() Config                    { l.mu.RLock(); defer l.mu.RUnlock(); return cloneConfig(l.config) }
+func (l *Loaded) ConfigPath() string                { return l.configPath }
+func (l *Loaded) ConfigIdentity() securefs.Identity { return l.configIdentity }
+func (l *Loaded) ConfigDirectoryIdentity() securefs.Identity {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.closed {
+		return securefs.Identity{}
+	}
+	return l.configParent.Identity()
+}
 func (l *Loaded) StateRootPath() string                { return l.statePath }
 func (l *Loaded) StateRootIdentity() securefs.Identity { return l.stateIdentity }
 func (l *Loaded) StateRoot() securefs.ReadRoot         { return &borrowedRoot{owner: l} }
@@ -181,20 +207,20 @@ func (loader Loader) Load(path string, mode ValidationMode) (*Loaded, error) {
 	parentPolicy.ExcludedAncestor = loader.CheckoutIdentity
 	parent, _, state, err := securefs.ValidateOutput(path, loader.CheckoutIdentity, parentPolicy, policy)
 	if err != nil {
-		stage := "config_directory"
+		stage := PathStageConfigDirectory
 		if outputStage, ok := securefs.OutputStageOf(err); ok && outputStage == securefs.OutputStageLeaf {
-			stage = "config_file"
+			stage = PathStageConfigFile
 		}
 		return nil, pathFailure(stage, mapConfigRead(err))
 	}
 	data, readState, err := parent.ReadFile(filepath.Base(path), policy)
 	if err != nil {
 		_ = parent.Close()
-		return nil, pathFailure("config_file", mapConfigRead(err))
+		return nil, pathFailure(PathStageConfigFile, mapConfigRead(err))
 	}
 	if readState.Identity != state.Identity {
 		_ = parent.Close()
-		return nil, pathFailure("config_file", typed(ErrPathSecurity, contract.D004))
+		return nil, pathFailure(PathStageConfigFile, typed(ErrPathSecurity, contract.D004))
 	}
 	cfg, err := Decode(data)
 	if err != nil {
@@ -210,9 +236,9 @@ func (loader Loader) Load(path string, mode ValidationMode) (*Loaded, error) {
 	if err != nil {
 		_ = parent.Close()
 		if errors.Is(err, securefs.ErrUnsupportedInspection) {
-			return nil, pathFailure("state_directory", typed(ErrPlatform, contract.D010))
+			return nil, pathFailure(PathStageStateDirectory, typed(ErrPlatform, contract.D010))
 		}
-		return nil, pathFailure("state_directory", typed(ErrPathSecurity, contract.D004))
+		return nil, pathFailure(PathStageStateDirectory, typed(ErrPathSecurity, contract.D004))
 	}
 	loaded := &Loaded{config: cfg, configPath: path, configIdentity: state.Identity, statePath: cfg.StateRootPath(), stateIdentity: stateRoot.Identity(), configParent: parent, stateRoot: stateRoot, mode: mode, document: append([]byte(nil), data...), policies: loader.Policies}
 	if mode != ValidatePure {

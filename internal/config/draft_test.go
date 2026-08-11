@@ -43,8 +43,33 @@ func TestReadDraftReturnsStableDecodedDefensiveSnapshot(t *testing.T) {
 
 func TestReadDraftReportsClosedDraftStage(t *testing.T) {
 	_, err := config.ReadDraft(filepath.Join(t.TempDir(), "missing", "draft.yaml"))
-	if stage, ok := config.PathStageOf(err); !ok || stage != "draft_file" || !errors.Is(err, config.ErrPathSecurity) {
+	if stage, ok := config.PathStageOf(err); !ok || stage != config.PathStageDraftFile || !errors.Is(err, config.ErrPathSecurity) {
 		t.Fatalf("draft error = stage %q ok %v err %v", stage, ok, err)
+	}
+}
+
+func TestReadDraftExcludingRejectsInstalledDirectoryDescendant(t *testing.T) {
+	installedDir := t.TempDir()
+	draftDir := filepath.Join(installedDir, "staged")
+	if err := os.Mkdir(draftDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	draftPath := filepath.Join(draftDir, "draft.yaml")
+	if err := os.WriteFile(draftPath, validDocument(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := securefs.OpenRoot(installedDir, securefs.RootPolicy{Access: securefs.IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	excluded := root.Identity()
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = config.ReadDraftExcluding(draftPath, excluded)
+	if stage, ok := config.PathStageOf(err); !ok || stage != config.PathStageDraftFile || !errors.Is(err, config.ErrPathSecurity) {
+		t.Fatalf("excluded descendant error = stage %q ok %v err %v", stage, ok, err)
 	}
 }
 
@@ -102,12 +127,12 @@ func TestLoaderReportsNonSensitivePathStages(t *testing.T) {
 	loader := config.Loader{Policies: policies}
 
 	_, err := loader.Load(filepath.Join(base, "missing", "config.yaml"), config.ValidatePure)
-	if stage, ok := config.PathStageOf(err); !ok || stage != "config_directory" {
+	if stage, ok := config.PathStageOf(err); !ok || stage != config.PathStageConfigDirectory {
 		t.Fatalf("config directory error = stage %q ok %v err %v", stage, ok, err)
 	}
 
 	_, err = loader.Load(filepath.Join(base, "missing.yaml"), config.ValidatePure)
-	if stage, ok := config.PathStageOf(err); !ok || stage != "config_file" {
+	if stage, ok := config.PathStageOf(err); !ok || stage != config.PathStageConfigFile {
 		t.Fatalf("config file error = stage %q ok %v err %v", stage, ok, err)
 	}
 
@@ -117,7 +142,7 @@ func TestLoaderReportsNonSensitivePathStages(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = loader.Load(path, config.ValidatePure)
-	if stage, ok := config.PathStageOf(err); !ok || stage != "state_directory" {
+	if stage, ok := config.PathStageOf(err); !ok || stage != config.PathStageStateDirectory {
 		t.Fatalf("state directory error = stage %q ok %v err %v", stage, ok, err)
 	}
 	if strings.Contains(err.Error(), base) {

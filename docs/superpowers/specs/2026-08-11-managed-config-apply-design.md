@@ -62,18 +62,23 @@ file ACL, so editors never need write access to the installed directory.
 ## Apply Flow
 
 1. Resolve the platform defaults and selected installed path.
-2. Open and retain the installed configuration and state roots under the
+2. Acquire the installed directory's cross-process apply lock and hold it
+   through validation, publication, verification, and any rollback. The lock
+   leaf is reserved and cannot also be selected as the installed config file.
+3. Open and retain the installed configuration and state roots under the
    existing operational validation policy.
-3. Read a stable draft snapshot from its own pinned parent directory.
-4. Decode the draft and reject changes to `instance_id` or `state_root`.
-5. Validate runtime dependencies represented by the draft, including
+4. Read a stable draft snapshot from its own pinned parent directory, rejecting
+   any path whose physical ancestry includes the installed directory.
+5. Decode the draft and reject changes to `instance_id` or `state_root`.
+6. Validate runtime dependencies represented by the draft, including
    destination policy, certificate inputs, credential/admin-token state,
    logging, source binding, and ACME state.
-6. Recheck the installed directory identity and exact permissions.
-7. Atomically publish the draft bytes to the installed filename through
+7. Recheck the installed directory identity and exact permissions.
+8. Atomically publish the draft bytes to the installed filename through
    `securefs.PublishOutput` with `ConfigFile` policy.
-8. Re-open and operationally validate the installed copy.
-9. If post-publish validation fails, atomically republish the retained previous
+9. Re-open and operationally validate the installed copy, and verify that its
+   bytes exactly match the retained draft snapshot.
+10. If post-publish validation fails, atomically republish the retained previous
    bytes and validate the restored copy. Report rollback failure distinctly;
    never claim success from a merely namespace-published write.
 
@@ -131,6 +136,8 @@ Add tests that prove:
    exposing path or identity metadata.
 9. Existing init, check, service, credential, PAC, and serve behavior remains
    unchanged.
+10. Concurrent apply commands serialize the complete transaction and cannot
+    overwrite or roll back another command's result.
 
 Run the repository's full required Go formatting, module, test, vet, and module
 listing gates before commit. After the new binary passes, deploy it during the

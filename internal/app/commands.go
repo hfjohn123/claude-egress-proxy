@@ -391,20 +391,11 @@ func newCheckConfigHandler(deps checkConfigDependencies) Handler {
 func checkConfigFailure(err error) Result {
 	result := initFailure(configCode(err))
 	stage, ok := config.PathStageOf(err)
-	if !ok || !validCheckConfigStage(stage) {
+	if !ok || !config.IsInstalledPathStage(stage) {
 		return result
 	}
-	result.Stderr = append(result.Stderr, []byte("path_stage="+stage+"\n")...)
+	result.Stderr = append(result.Stderr, []byte("path_stage="+string(stage)+"\n")...)
 	return result
-}
-
-func validCheckConfigStage(stage string) bool {
-	switch stage {
-	case "config_directory", "config_file", "state_directory":
-		return true
-	default:
-		return false
-	}
 }
 
 func checkConfigDiagnostics(configuration config.Config) []byte {

@@ -18,6 +18,10 @@ func (d Draft) Document() []byte            { return append([]byte(nil), d.docum
 func (d Draft) Identity() securefs.Identity { return d.identity }
 
 func ReadDraft(path string) (Draft, error) {
+	return ReadDraftExcluding(path, securefs.Identity{})
+}
+
+func ReadDraftExcluding(path string, excludedAncestor securefs.Identity) (Draft, error) {
 	access := securefs.IdentityOnlyPermissions()
 	filePolicy := securefs.FilePolicy{
 		Presence: securefs.Required,
@@ -25,18 +29,18 @@ func ReadDraft(path string) (Draft, error) {
 		Access:   access,
 		MaxBytes: int64(contract.V1().ConfigBytes),
 	}
-	parent, name, state, err := securefs.ValidateOutput(path, securefs.Identity{}, securefs.RootPolicy{Access: access}, filePolicy)
+	parent, name, state, err := securefs.ValidateOutput(path, excludedAncestor, securefs.RootPolicy{Access: access}, filePolicy)
 	if err != nil {
-		return Draft{}, pathFailure("draft_file", mapDraftRead(err))
+		return Draft{}, pathFailure(PathStageDraftFile, mapDraftRead(err))
 	}
 	defer parent.Close()
 
 	document, readState, err := parent.ReadFile(name, filePolicy)
 	if err != nil {
-		return Draft{}, pathFailure("draft_file", mapDraftRead(err))
+		return Draft{}, pathFailure(PathStageDraftFile, mapDraftRead(err))
 	}
 	if readState.Identity != state.Identity {
-		return Draft{}, pathFailure("draft_file", typed(ErrPathSecurity, contract.D004))
+		return Draft{}, pathFailure(PathStageDraftFile, typed(ErrPathSecurity, contract.D004))
 	}
 	cfg, err := Decode(document)
 	if err != nil {
