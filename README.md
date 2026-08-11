@@ -16,6 +16,70 @@ SOCKS, and TLS interception are out of scope.
 Do not use this pre-release in production. The repository intentionally
 contains no credentials, private endpoints, personal paths, or runtime state.
 
+## Quick start
+
+Download the native Linux or Windows artifact for your architecture from
+[GitHub Releases](https://github.com/hfjohn123/claude-egress-proxy/releases)
+and verify it against `SHA256SUMS`. Rename it to `claude-egress-proxy`
+(`claude-egress-proxy.exe` on Windows) and place it on the server's `PATH`. Use
+absolute paths chosen for the target platform; the deployment guides cover the
+required ownership and service permissions.
+
+1. Generate the configuration and state directory:
+
+   ```text
+   claude-egress-proxy --config <absolute-config-file> init --state-root <absolute-state-directory>
+   ```
+
+2. Edit the generated configuration for the public hostname, listener, TLS
+   mode, resolver, public server addresses, and allowed destinations. Follow
+   the [home](docs/deploy-home.md) or [VPS](docs/deploy-vps.md) guide for DNS,
+   TCP 443, NAT/firewall, and ACME requirements.
+
+3. Validate the configuration and host network:
+
+   ```text
+   claude-egress-proxy --config <absolute-config-file> check config
+   claude-egress-proxy --config <absolute-config-file> check network
+   ```
+
+4. Create a separate credential for each client device:
+
+   ```text
+   claude-egress-proxy --config <absolute-config-file> credential add --device <device-identifier>
+   ```
+
+   The credential secret is emitted once. Store it securely, never commit or
+   log it, and revoke it if that device is lost or compromised.
+
+5. Start the proxy in the foreground:
+
+   ```text
+   claude-egress-proxy --config <absolute-config-file> serve
+   ```
+
+   For persistent operation, install and start the native service instead:
+
+   ```text
+   claude-egress-proxy --config <absolute-config-file> service install
+   claude-egress-proxy --config <absolute-config-file> service start
+   ```
+
+6. Configure a supported client separately with the server's HTTPS proxy
+   hostname, TCP port 443, and the per-device Basic credential. See
+   [client approaches](docs/client-configuration.md); the proxy does not install
+   or enforce client settings.
+
+7. If the generated loopback admin listener is enabled at its default address,
+   verify local readiness:
+
+   ```text
+   claude-egress-proxy check health --address 127.0.0.1:9090
+   ```
+
+Keep the admin listener on loopback only. Read the
+[security guide](docs/security.md) before exposing the public listener.
+
 ## Boundaries and operation
 
 This is a server-only project. A deployment begins only after a request reaches
