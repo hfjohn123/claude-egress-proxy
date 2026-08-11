@@ -29,9 +29,10 @@ type Result struct {
 type Handler func(context.Context, cli.Invocation) Result
 
 type Dependencies struct {
-	Serve, Init, Credential, AdminToken         Handler
-	PAC, CheckConfig, CheckHealth, CheckNetwork Handler
-	Service                                     Handler
+	Serve, Init, Credential, AdminToken Handler
+	PAC, ConfigApply, CheckConfig       Handler
+	CheckHealth, CheckNetwork           Handler
+	Service                             Handler
 }
 
 type InitDependencies struct {
@@ -245,11 +246,11 @@ func initFailure(code contract.DiagnosticCode) Result {
 func ProductionDependencies() Dependencies {
 	checkout, err := config.CheckoutIdentity()
 	if err != nil {
-		return Dependencies{Serve: NewServeHandler(), Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, Credential: NewCredentialHandler(), PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler(), CheckHealth: NewHealthHandler(), CheckNetwork: NewNetworkHandler(), Service: NewServiceHandler()}
+		return Dependencies{Serve: NewServeHandler(), Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, Credential: NewCredentialHandler(), PAC: NewPACHandler(), ConfigApply: NewConfigApplyHandler(), CheckConfig: NewCheckConfigHandler(), CheckHealth: NewHealthHandler(), CheckNetwork: NewNetworkHandler(), Service: NewServiceHandler()}
 	}
 	return Dependencies{Serve: NewServeHandler(), Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Prepare: func(ctx context.Context) (service.Undo, error) {
 		return service.Prepare(ctx, service.NewPlatform(), service.Install)
-	}, Checkout: checkout}), Credential: NewCredentialHandler(), AdminToken: NewAdminTokenHandler(), PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler(), CheckHealth: NewHealthHandler(), CheckNetwork: NewNetworkHandler(), Service: NewServiceHandler()}
+	}, Checkout: checkout}), Credential: NewCredentialHandler(), AdminToken: NewAdminTokenHandler(), PAC: NewPACHandler(), ConfigApply: NewConfigApplyHandler(), CheckConfig: NewCheckConfigHandler(), CheckHealth: NewHealthHandler(), CheckNetwork: NewNetworkHandler(), Service: NewServiceHandler()}
 }
 
 func NewHealthHandler() Handler { return newHealthHandler(checkpkg.Health) }
@@ -380,11 +381,21 @@ func newCheckConfigHandler(deps checkConfigDependencies) Handler {
 		}
 		loaded, err := deps.load(path, config.ValidateOperational)
 		if err != nil {
-			return initFailure(configCode(err))
+			return checkConfigFailure(err)
 		}
 		defer loaded.Close()
 		return Result{Stdout: checkConfigDiagnostics(loaded.Config())}
 	}
+}
+
+func checkConfigFailure(err error) Result {
+	result := initFailure(configCode(err))
+	stage, ok := config.PathStageOf(err)
+	if !ok || !config.IsInstalledPathStage(stage) {
+		return result
+	}
+	result.Stderr = append(result.Stderr, []byte("path_stage="+string(stage)+"\n")...)
+	return result
 }
 
 func checkConfigDiagnostics(configuration config.Config) []byte {
@@ -488,7 +499,11 @@ func newPACHandler(deps pacDependencies) Handler {
 }
 
 func publishPAC(ctx context.Context, invocation cli.Invocation, body []byte) error {
-	policies, err := config.PlatformSecurityPolicies()
+	return publishPACUsing(ctx, invocation, body, productionInstalledConfigFilesystem())
+}
+
+func publishPACUsing(ctx context.Context, invocation cli.Invocation, body []byte, filesystem installedConfigFilesystem) error {
+	policies, err := filesystem.securityPolicies()
 	if err != nil {
 		return err
 	}
@@ -496,15 +511,18 @@ func publishPAC(ctx context.Context, invocation cli.Invocation, body []byte) err
 	output.Presence = securefs.Optional
 	output.Kind = securefs.RegularFile
 	output.MaxBytes = int64(contract.V1().PACBytes)
-	checkout, err := config.CheckoutIdentity()
+	checkout, err := filesystem.checkoutIdentity()
 	if err != nil {
 		return securefs.ErrIdentityChanged
 	}
-	parent, name, _, err := securefs.ValidateMutableOutput(invocation.PACOutput, checkout, policies.ConfigDirectory, output)
+	parent, name, _, err := filesystem.validateMutableOutput(invocation.PACOutput, checkout, policies.ConfigDirectory, output)
 	if err != nil {
 		return err
 	}
 	defer parent.Close()
+	if configDirectoryLeafReserved(name) {
+		return securefs.ErrUnsafePath
+	}
 	boundary, err := parent.PublishOutput(ctx, name, body, output)
 	if err != nil {
 		return err
@@ -513,6 +531,10 @@ func publishPAC(ctx context.Context, invocation cli.Invocation, body []byte) err
 		return securefs.ErrUnsupportedInspection
 	}
 	return nil
+}
+
+func configDirectoryLeafReserved(name string) bool {
+	return sameConfigApplyPath(name, configApplyLockName)
 }
 
 func configCode(err error) contract.DiagnosticCode {
@@ -546,6 +568,8 @@ func (d Dependencies) handler(command cli.Command) Handler {
 		return d.AdminToken
 	case cli.PAC:
 		return d.PAC
+	case cli.ConfigApply:
+		return d.ConfigApply
 	case cli.CheckConfig:
 		return d.CheckConfig
 	case cli.CheckHealth:

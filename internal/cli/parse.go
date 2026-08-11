@@ -18,6 +18,7 @@ const (
 	CredentialList
 	AdminTokenRotate
 	PAC
+	ConfigApply
 	CheckConfig
 	CheckHealth
 	CheckNetwork
@@ -36,10 +37,10 @@ const (
 
 // Invocation is the typed, secret-free result of parsing one command line.
 type Invocation struct {
-	Command                                 Command
-	ConfigPath, StateRoot, Device, RecordID string
-	PACOutput, HealthAddress, PublicIPURL   string
-	ServiceAction                           ServiceAction
+	Command                                              Command
+	ConfigPath, ConfigInput, StateRoot, Device, RecordID string
+	PACOutput, HealthAddress, PublicIPURL                string
+	ServiceAction                                        ServiceAction
 }
 
 // Parse accepts only the frozen argv grammar for the supplied platform.
@@ -135,6 +136,8 @@ func parseCommand(args []string, goos string) (Invocation, *UsageError) {
 			return Invocation{}, usage(UsagePAC)
 		}
 		return Invocation{Command: PAC, PACOutput: args[2]}, nil
+	case "config":
+		return parseConfig(args, goos)
 	case "check":
 		return parseCheck(args)
 	case "service":
@@ -142,6 +145,13 @@ func parseCommand(args []string, goos string) (Invocation, *UsageError) {
 	default:
 		return Invocation{}, usage(UsageRoot)
 	}
+}
+
+func parseConfig(args []string, goos string) (Invocation, *UsageError) {
+	if len(args) != 4 || args[1] != "apply" || args[2] != "--input" || !absolutePath(args[3], goos) {
+		return Invocation{}, usage(UsageConfigApply)
+	}
+	return Invocation{Command: ConfigApply, ConfigInput: args[3]}, nil
 }
 
 func parseCredential(args []string) (Invocation, *UsageError) {

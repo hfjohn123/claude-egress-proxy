@@ -24,6 +24,7 @@ func TestRunDispatchesEveryCommandToItsFrozenHandler(t *testing.T) {
 		{"credential purge", []string{"credential", "purge", "--record", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "credential"},
 		{"credential list", []string{"credential", "list"}, "credential"}, {"admin", []string{"admin-token", "rotate"}, "admin"},
 		{"pac", []string{"pac", "--output", appAbsolutePath()}, "pac"}, {"check config", []string{"check", "config"}, "config"},
+		{"config apply", []string{"config", "apply", "--input", appAbsolutePath()}, "config apply"},
 		{"check health", []string{"check", "health", "--address", "127.0.0.1:9090"}, "health"}, {"check network", []string{"check", "network"}, "network"},
 		{"service", []string{"service", "install"}, "service"},
 	}
@@ -31,7 +32,7 @@ func TestRunDispatchesEveryCommandToItsFrozenHandler(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			deps := Dependencies{
 				Serve: handler("serve"), Init: handler("init"), Credential: handler("credential"), AdminToken: handler("admin"),
-				PAC: handler("pac"), CheckConfig: handler("config"), CheckHealth: handler("health"), CheckNetwork: handler("network"), Service: handler("service"),
+				PAC: handler("pac"), ConfigApply: handler("config apply"), CheckConfig: handler("config"), CheckHealth: handler("health"), CheckNetwork: handler("network"), Service: handler("service"),
 			}
 			var stdout, stderr bytes.Buffer
 			if got := Run(context.Background(), deps, test.argv, &stdout, &stderr); got != 0 {

@@ -10,8 +10,8 @@ import (
 func TestDocumentationContract(t *testing.T) {
 	root := filepath.Join("..", "..")
 	required := map[string][]string{
-		"README.md":                    {"server-only", "not affiliated", "does not provide a client"},
-		"docs/configuration.md":        {"generated configuration", "per_device_capacity", "absolute_tunnel_lifetime", "graceful_shutdown_drain"},
+		"README.md":                    {"server-only", "not affiliated", "does not provide a client", "operator-owned draft"},
+		"docs/configuration.md":        {"generated configuration", "per_device_capacity", "absolute_tunnel_lifetime", "graceful_shutdown_drain", "config apply --input", "never fix `d004`"},
 		"docs/security.md":             {"checkpoint restore", "rotate", "payload"},
 		"docs/deploy-home.md":          {"CGNAT", "TLS-ALPN-01", "443"},
 		"docs/deploy-vps.md":           {"--stop-timeout 25", "systemd", "Compose"},

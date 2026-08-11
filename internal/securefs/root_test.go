@@ -235,6 +235,33 @@ func TestValidateOutputExcludesCheckoutAndRetainsParent(t *testing.T) {
 	}
 }
 
+func TestValidateOutputReportsParentAndLeafFailureStages(t *testing.T) {
+	policy := FilePolicy{Presence: Required, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 64}
+	parentPolicy := RootPolicy{Access: IdentityOnlyPermissions()}
+
+	base := t.TempDir()
+	_, _, _, err := ValidateOutput(filepath.Join(base, "missing", "config.yaml"), Identity{}, parentPolicy, policy)
+	if stage, ok := OutputStageOf(err); !ok || stage != OutputStageParent || !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("parent failure = stage %v ok %v err %v", stage, ok, err)
+	}
+
+	_, _, _, err = ValidateOutput(filepath.Join(base, "config.yaml"), Identity{}, parentPolicy, policy)
+	if stage, ok := OutputStageOf(err); !ok || stage != OutputStageLeaf || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("leaf failure = stage %v ok %v err %v", stage, ok, err)
+	}
+}
+
+func TestValidateMutableOutputReportsParentFailureStage(t *testing.T) {
+	policy := FilePolicy{Presence: Required, Kind: RegularFile, Access: IdentityOnlyPermissions(), MaxBytes: 64}
+	parentPolicy := RootPolicy{Access: IdentityOnlyPermissions()}
+
+	base := t.TempDir()
+	_, _, _, err := ValidateMutableOutput(filepath.Join(base, "missing", "config.yaml"), Identity{}, parentPolicy, policy)
+	if stage, ok := OutputStageOf(err); !ok || stage != OutputStageParent || !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("parent failure = stage %v ok %v err %v", stage, ok, err)
+	}
+}
+
 // TestCreateRootCreatesExactlyOneRestrictedLeaf catches a creation helper that
 // follows paths or creates intermediate directories instead of one leaf.
 func TestCreateRootCreatesExactlyOneRestrictedLeaf(t *testing.T) {

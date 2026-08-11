@@ -29,7 +29,49 @@ var (
 	ErrPathSecurity          = errors.New("configuration path security")
 	ErrPlatform              = errors.New("configuration platform")
 	ErrValidationUnavailable = errors.New("configuration validation unavailable")
+	ErrImmutable             = errors.New("immutable configuration field changed")
 )
+
+type PathStage string
+
+const (
+	PathStageConfigDirectory PathStage = "config_directory"
+	PathStageConfigFile      PathStage = "config_file"
+	PathStageStateDirectory  PathStage = "state_directory"
+	PathStageDraftFile       PathStage = "draft_file"
+)
+
+func IsInstalledPathStage(stage PathStage) bool {
+	switch stage {
+	case PathStageConfigDirectory, PathStageConfigFile, PathStageStateDirectory:
+		return true
+	default:
+		return false
+	}
+}
+
+type pathStageError struct {
+	stage PathStage
+	err   error
+}
+
+func (e pathStageError) Error() string { return e.err.Error() }
+func (e pathStageError) Unwrap() error { return e.err }
+
+func pathFailure(stage PathStage, err error) error {
+	if err == nil {
+		return nil
+	}
+	return pathStageError{stage: stage, err: err}
+}
+
+func PathStageOf(err error) (PathStage, bool) {
+	var staged pathStageError
+	if !errors.As(err, &staged) {
+		return "", false
+	}
+	return staged.stage, true
+}
 
 type Error struct {
 	cause error
@@ -64,16 +106,31 @@ type Loaded struct {
 	configParent   securefs.Root
 	stateRoot      securefs.Root
 	mode           ValidationMode
+	document       []byte
+	policies       SecurityPolicies
 }
 type borrowedRoot struct{ owner *Loaded }
 
-func (l *Loaded) Config() Config                       { l.mu.RLock(); defer l.mu.RUnlock(); return cloneConfig(l.config) }
-func (l *Loaded) ConfigPath() string                   { return l.configPath }
-func (l *Loaded) ConfigIdentity() securefs.Identity    { return l.configIdentity }
+func (l *Loaded) Config() Config                    { l.mu.RLock(); defer l.mu.RUnlock(); return cloneConfig(l.config) }
+func (l *Loaded) ConfigPath() string                { return l.configPath }
+func (l *Loaded) ConfigIdentity() securefs.Identity { return l.configIdentity }
+func (l *Loaded) ConfigDirectoryIdentity() securefs.Identity {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.closed {
+		return securefs.Identity{}
+	}
+	return l.configParent.Identity()
+}
 func (l *Loaded) StateRootPath() string                { return l.statePath }
 func (l *Loaded) StateRootIdentity() securefs.Identity { return l.stateIdentity }
 func (l *Loaded) StateRoot() securefs.ReadRoot         { return &borrowedRoot{owner: l} }
 func (l *Loaded) ValidationMode() ValidationMode       { return l.mode }
+func (l *Loaded) Document() []byte {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return append([]byte(nil), l.document...)
+}
 func (l *Loaded) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -150,16 +207,20 @@ func (loader Loader) Load(path string, mode ValidationMode) (*Loaded, error) {
 	parentPolicy.ExcludedAncestor = loader.CheckoutIdentity
 	parent, _, state, err := securefs.ValidateOutput(path, loader.CheckoutIdentity, parentPolicy, policy)
 	if err != nil {
-		return nil, mapConfigRead(err)
+		stage := PathStageConfigDirectory
+		if outputStage, ok := securefs.OutputStageOf(err); ok && outputStage == securefs.OutputStageLeaf {
+			stage = PathStageConfigFile
+		}
+		return nil, pathFailure(stage, mapConfigRead(err))
 	}
 	data, readState, err := parent.ReadFile(filepath.Base(path), policy)
 	if err != nil {
 		_ = parent.Close()
-		return nil, mapConfigRead(err)
+		return nil, pathFailure(PathStageConfigFile, mapConfigRead(err))
 	}
 	if readState.Identity != state.Identity {
 		_ = parent.Close()
-		return nil, typed(ErrPathSecurity, contract.D004)
+		return nil, pathFailure(PathStageConfigFile, typed(ErrPathSecurity, contract.D004))
 	}
 	cfg, err := Decode(data)
 	if err != nil {
@@ -175,11 +236,11 @@ func (loader Loader) Load(path string, mode ValidationMode) (*Loaded, error) {
 	if err != nil {
 		_ = parent.Close()
 		if errors.Is(err, securefs.ErrUnsupportedInspection) {
-			return nil, typed(ErrPlatform, contract.D010)
+			return nil, pathFailure(PathStageStateDirectory, typed(ErrPlatform, contract.D010))
 		}
-		return nil, typed(ErrPathSecurity, contract.D004)
+		return nil, pathFailure(PathStageStateDirectory, typed(ErrPathSecurity, contract.D004))
 	}
-	loaded := &Loaded{config: cfg, configPath: path, configIdentity: state.Identity, statePath: cfg.StateRootPath(), stateIdentity: stateRoot.Identity(), configParent: parent, stateRoot: stateRoot, mode: mode}
+	loaded := &Loaded{config: cfg, configPath: path, configIdentity: state.Identity, statePath: cfg.StateRootPath(), stateIdentity: stateRoot.Identity(), configParent: parent, stateRoot: stateRoot, mode: mode, document: append([]byte(nil), data...), policies: loader.Policies}
 	if mode != ValidatePure {
 		if err := validateOperational(loaded, loader.Policies); err != nil {
 			_ = loaded.Close()
@@ -190,10 +251,13 @@ func (loader Loader) Load(path string, mode ValidationMode) (*Loaded, error) {
 }
 
 func validateOperational(loaded *Loaded, policies SecurityPolicies) error {
-	cfg := loaded.Config()
+	return validateOperationalConfig(loaded.Config(), loaded.StateRoot(), policies)
+}
+
+func validateOperationalConfig(cfg Config, stateRoot securefs.ReadRoot, policies SecurityPolicies) error {
 	identityPolicy := securefs.FilePolicy{Presence: securefs.Optional, Kind: securefs.RegularFile, Access: securefs.IdentityOnlyPermissions(), MaxBytes: int64(contract.V1().StoreBytes)}
-	storeState, storeErr := loaded.StateRoot().Inspect("credentials.json", identityPolicy)
-	lockState, lockErr := loaded.StateRoot().Inspect("credentials.lock", identityPolicy)
+	storeState, storeErr := stateRoot.Inspect("credentials.json", identityPolicy)
+	lockState, lockErr := stateRoot.Inspect("credentials.lock", identityPolicy)
 	if storeErr != nil || lockErr != nil {
 		return typed(ErrValue, contract.D005)
 	}
@@ -203,7 +267,7 @@ func validateOperational(loaded *Loaded, policies SecurityPolicies) error {
 	}
 	artifactPolicy.Presence, artifactPolicy.Kind, artifactPolicy.MaxBytes = securefs.Optional, securefs.RegularFile, int64(contract.V1().StoreBytes)
 	if storeState.Present || lockState.Present {
-		inspector, err := credential.OpenInspector(loaded.StateRoot(), cfg.InstanceID(), artifactPolicy)
+		inspector, err := credential.OpenInspector(stateRoot, cfg.InstanceID(), artifactPolicy)
 		if err != nil {
 			return typed(ErrValue, contract.D005)
 		}
@@ -212,7 +276,7 @@ func validateOperational(loaded *Loaded, policies SecurityPolicies) error {
 			return typed(ErrValue, contract.D005)
 		}
 	}
-	if _, err := admintoken.LoadVerifier(context.Background(), loaded.StateRoot(), cfg.InstanceID(), artifactPolicy, cfg.Metrics().Enabled()); err != nil {
+	if _, err := admintoken.LoadVerifier(context.Background(), stateRoot, cfg.InstanceID(), artifactPolicy, cfg.Metrics().Enabled()); err != nil {
 		return typed(ErrValue, contract.D006)
 	}
 	if cfg.TLS().Mode() == TLSSupplied {
@@ -224,7 +288,7 @@ func validateOperational(loaded *Loaded, policies SecurityPolicies) error {
 		}
 	}
 	if cfg.TLS().Mode() == TLSACME {
-		store := certmgr.ACMEStore{Root: loaded.StateRoot(), Name: "acme.json", Policy: artifactPolicy}
+		store := certmgr.ACMEStore{Root: stateRoot, Name: "acme.json", Policy: artifactPolicy}
 		if _, err := store.Load(); err != nil && !errors.Is(err, certmgr.ErrACMEStateAbsent) {
 			return typed(ErrValue, contract.D007)
 		}
@@ -247,6 +311,18 @@ func validateOperational(loaded *Loaded, policies SecurityPolicies) error {
 		}
 	}
 	return nil
+}
+
+func ValidateReplacement(current *Loaded, draft Draft) error {
+	if current == nil {
+		return typed(ErrValue, contract.D003)
+	}
+	installed := current.Config()
+	candidate := draft.Config()
+	if installed.InstanceID() != candidate.InstanceID() || installed.StateRootPath() != candidate.StateRootPath() {
+		return ErrImmutable
+	}
+	return validateOperationalConfig(candidate, current.StateRoot(), current.policies)
 }
 
 func mapConfigRead(err error) error {

@@ -31,10 +31,19 @@ required ownership and service permissions.
    claude-egress-proxy --config <absolute-config-file> init --state-root <absolute-state-directory>
    ```
 
-2. Edit the generated configuration for the public hostname, listener, TLS
-   mode, resolver, public server addresses, and allowed destinations. Follow
-   the [home](docs/deploy-home.md) or [VPS](docs/deploy-vps.md) guide for DNS,
-   TCP 443, NAT/firewall, and ACME requirements.
+2. Copy the generated file to an operator-owned draft outside the installed
+   configuration directory. Edit the draft for the public hostname, listener,
+   TLS mode, resolver, public server addresses, and allowed destinations, then
+   apply it through the proxy:
+
+   ```text
+   claude-egress-proxy --config <absolute-config-file> config apply --input <absolute-draft-file>
+   ```
+
+   Do not give an editor access to the installed configuration directory or
+   edit the installed file directly. Follow the [home](docs/deploy-home.md) or
+   [VPS](docs/deploy-vps.md) guide for DNS, TCP 443, NAT/firewall, and ACME
+   requirements.
 
 3. Validate the configuration and host network:
 

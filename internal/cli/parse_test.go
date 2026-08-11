@@ -8,6 +8,7 @@ import (
 
 const (
 	absConfig = "/etc/claude-egress-proxy/config.yaml"
+	absDraft  = "/tmp/claude-egress-proxy-draft.yaml"
 	absState  = "/var/lib/claude-egress-proxy"
 	absPAC    = "/var/lib/claude-egress-proxy/proxy.pac"
 )
@@ -27,6 +28,7 @@ func TestUsageBytesCatchChangedOrMalformedUsageOutput(t *testing.T) {
 		{"credential list", UsageCredentialList, "usage: claude-egress-proxy [--config <absolute-file>] credential list\n"},
 		{"admin token", UsageAdminTokenRotate, "usage: claude-egress-proxy [--config <absolute-file>] admin-token rotate\n"},
 		{"pac", UsagePAC, "usage: claude-egress-proxy [--config <absolute-file>] pac --output <absolute-file>\n"},
+		{"config apply", UsageConfigApply, "usage: claude-egress-proxy [--config <absolute-installed-file>] config apply --input <absolute-draft-file>\n"},
 		{"check config", UsageCheckConfig, "usage: claude-egress-proxy [--config <absolute-file>] check config\n"},
 		{"check health", UsageCheckHealth, "usage: claude-egress-proxy check health --address <loopback-IP:port>\n"},
 		{"check network", UsageCheckNetwork, "usage: claude-egress-proxy [--config <absolute-file>] check network [--public-ip-url <https-url>]\n"},
@@ -64,6 +66,7 @@ func TestParseAcceptsOnlyEachFrozenCommandGrammar(t *testing.T) {
 		{"credential list", []string{"credential", "list"}, CredentialList, ServiceActionNone, true},
 		{"admin token rotate", []string{"admin-token", "rotate"}, AdminTokenRotate, ServiceActionNone, true},
 		{"pac", []string{"pac", "--output", absPAC}, PAC, ServiceActionNone, true},
+		{"config apply", []string{"config", "apply", "--input", absDraft}, ConfigApply, ServiceActionNone, true},
 		{"check health", []string{"check", "health", "--address", "127.0.0.1:9090"}, CheckHealth, ServiceActionNone, false},
 		{"check network", []string{"check", "network"}, CheckNetwork, ServiceActionNone, true},
 		{"check network public url", []string{"check", "network", "--public-ip-url", "https://echo.example/"}, CheckNetwork, ServiceActionNone, true},
@@ -81,6 +84,9 @@ func TestParseAcceptsOnlyEachFrozenCommandGrammar(t *testing.T) {
 			}
 			if invocation.Command != test.command || invocation.ServiceAction != test.action {
 				t.Fatalf("Parse(%q) command/action = %v/%v, want %v/%v", test.argv, invocation.Command, invocation.ServiceAction, test.command, test.action)
+			}
+			if test.command == ConfigApply && invocation.ConfigInput != absDraft {
+				t.Fatalf("Parse(%q) input = %q, want %q", test.argv, invocation.ConfigInput, absDraft)
 			}
 			seen[test.command] = true
 		})
@@ -107,6 +113,7 @@ func TestParseRejectsGrammarMutationsThatWouldBroadenTheCommandSurface(t *testin
 		{"credential", "add", "--device", "laptop-1"}, {"credential", "revoke", "--record", strings.Repeat("a", 32)},
 		{"credential", "purge", "--record", strings.Repeat("b", 32)}, {"credential", "list"}, {"admin-token", "rotate"},
 		{"pac", "--output", absPAC}, {"check", "config"}, {"check", "health", "--address", "127.0.0.1:9090"},
+		{"config", "apply", "--input", absDraft},
 		{"check", "network"}, {"check", "network", "--public-ip-url", "https://echo.example/"},
 		{"service", "install"}, {"service", "uninstall"}, {"service", "start"}, {"service", "stop"},
 	}
@@ -164,6 +171,7 @@ func TestParseRoutesEveryCommandToItsExactUsageLine(t *testing.T) {
 		{"credential list", []string{"credential", "list", "unexpected"}, "usage: claude-egress-proxy [--config <absolute-file>] credential list\n"},
 		{"admin", []string{"admin-token", "unexpected"}, "usage: claude-egress-proxy [--config <absolute-file>] admin-token rotate\n"},
 		{"pac", []string{"pac"}, "usage: claude-egress-proxy [--config <absolute-file>] pac --output <absolute-file>\n"},
+		{"config apply", []string{"config", "apply", "--input", "relative.yaml"}, "usage: claude-egress-proxy [--config <absolute-installed-file>] config apply --input <absolute-draft-file>\n"},
 		{"check config", []string{"check", "config", "unexpected"}, "usage: claude-egress-proxy [--config <absolute-file>] check config\n"},
 		{"check health", []string{"check", "health"}, "usage: claude-egress-proxy check health --address <loopback-IP:port>\n"},
 		{"check network", []string{"check", "network", "unexpected"}, "usage: claude-egress-proxy [--config <absolute-file>] check network [--public-ip-url <https-url>]\n"},

@@ -31,6 +31,37 @@ func IsPathSecurityFailure(err error) bool {
 	return errors.As(err, &target)
 }
 
+type OutputStage uint8
+
+const (
+	OutputStageInvalid OutputStage = iota
+	OutputStageParent
+	OutputStageLeaf
+)
+
+type outputStageError struct {
+	stage OutputStage
+	err   error
+}
+
+func (e outputStageError) Error() string { return e.err.Error() }
+func (e outputStageError) Unwrap() error { return e.err }
+
+func outputFailure(stage OutputStage, err error) error {
+	if err == nil {
+		return nil
+	}
+	return outputStageError{stage: stage, err: err}
+}
+
+func OutputStageOf(err error) (OutputStage, bool) {
+	var staged outputStageError
+	if !errors.As(err, &staged) {
+		return OutputStageInvalid, false
+	}
+	return staged.stage, true
+}
+
 type Presence uint8
 
 const (
@@ -294,42 +325,42 @@ func CreateFileOnce(ctx context.Context, parent CreateCapableRoot, name string, 
 
 func ValidateOutput(path string, checkout Identity, parentPolicy RootPolicy, outputPolicy FilePolicy) (parent Root, name string, state FileState, err error) {
 	if !validFilePolicy(outputPolicy) || !platformCleanAbsolute(path) {
-		return nil, "", FileState{}, ErrUnsafePath
+		return nil, "", FileState{}, outputFailure(OutputStageParent, ErrUnsafePath)
 	}
 	parentPath, name, err := platformSplitOutput(path)
 	if err != nil {
-		return nil, "", FileState{}, err
+		return nil, "", FileState{}, outputFailure(OutputStageParent, err)
 	}
 	parentPolicy.ExcludedAncestor = checkout
 	parent, err = OpenRoot(parentPath, parentPolicy)
 	if err != nil {
-		return nil, "", FileState{}, err
+		return nil, "", FileState{}, outputFailure(OutputStageParent, err)
 	}
 	state, err = parent.Inspect(name, outputPolicy)
 	if err != nil {
 		_ = parent.Close()
-		return nil, "", FileState{}, err
+		return nil, "", FileState{}, outputFailure(OutputStageLeaf, err)
 	}
 	return parent, name, state, nil
 }
 
 func ValidateMutableOutput(path string, checkout Identity, parentPolicy RootPolicy, outputPolicy FilePolicy) (parent MutableRoot, name string, state FileState, err error) {
 	if !validFilePolicy(outputPolicy) || !platformCleanAbsolute(path) {
-		return nil, "", FileState{}, ErrUnsafePath
+		return nil, "", FileState{}, outputFailure(OutputStageParent, ErrUnsafePath)
 	}
 	parentPath, name, err := platformSplitOutput(path)
 	if err != nil {
-		return nil, "", FileState{}, err
+		return nil, "", FileState{}, outputFailure(OutputStageParent, err)
 	}
 	parentPolicy.ExcludedAncestor = checkout
 	parent, err = OpenMutableRoot(parentPath, parentPolicy)
 	if err != nil {
-		return nil, "", FileState{}, err
+		return nil, "", FileState{}, outputFailure(OutputStageParent, err)
 	}
 	state, err = parent.Inspect(name, outputPolicy)
 	if err != nil {
 		_ = parent.Close()
-		return nil, "", FileState{}, err
+		return nil, "", FileState{}, outputFailure(OutputStageLeaf, err)
 	}
 	return parent, name, state, nil
 }

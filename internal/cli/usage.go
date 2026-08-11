@@ -10,6 +10,7 @@ var (
 	UsageCredentialList   = []byte("usage: claude-egress-proxy [--config <absolute-file>] credential list\n")
 	UsageAdminTokenRotate = []byte("usage: claude-egress-proxy [--config <absolute-file>] admin-token rotate\n")
 	UsagePAC              = []byte("usage: claude-egress-proxy [--config <absolute-file>] pac --output <absolute-file>\n")
+	UsageConfigApply      = []byte("usage: claude-egress-proxy [--config <absolute-installed-file>] config apply --input <absolute-draft-file>\n")
 	UsageCheckConfig      = []byte("usage: claude-egress-proxy [--config <absolute-file>] check config\n")
 	UsageCheckHealth      = []byte("usage: claude-egress-proxy check health --address <loopback-IP:port>\n")
 	UsageCheckNetwork     = []byte("usage: claude-egress-proxy [--config <absolute-file>] check network [--public-ip-url <https-url>]\n")
@@ -40,6 +41,8 @@ func usageFor(command Command) *UsageError {
 		return usage(UsageAdminTokenRotate)
 	case PAC:
 		return usage(UsagePAC)
+	case ConfigApply:
+		return usage(UsageConfigApply)
 	case CheckConfig:
 		return usage(UsageCheckConfig)
 	case CheckHealth:
