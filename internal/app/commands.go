@@ -29,9 +29,10 @@ type Result struct {
 type Handler func(context.Context, cli.Invocation) Result
 
 type Dependencies struct {
-	Serve, Init, Credential, AdminToken         Handler
-	PAC, CheckConfig, CheckHealth, CheckNetwork Handler
-	Service                                     Handler
+	Serve, Init, Credential, AdminToken Handler
+	PAC, ConfigApply, CheckConfig       Handler
+	CheckHealth, CheckNetwork           Handler
+	Service                             Handler
 }
 
 type InitDependencies struct {
@@ -546,6 +547,8 @@ func (d Dependencies) handler(command cli.Command) Handler {
 		return d.AdminToken
 	case cli.PAC:
 		return d.PAC
+	case cli.ConfigApply:
+		return d.ConfigApply
 	case cli.CheckConfig:
 		return d.CheckConfig
 	case cli.CheckHealth:
