@@ -15,7 +15,7 @@ import (
 	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
 )
 
-const configApplyLockName = "config-apply.lock"
+const configApplyLockName = "cfgapply.lck"
 
 var errConfigApplyReservedLockName = errors.New("installed configuration uses reserved apply lock name")
 
@@ -25,7 +25,12 @@ type configApplyDependencies struct {
 	readDraft func(string, securefs.Identity) (config.Draft, error)
 	validate  func(*config.Loaded, config.Draft) error
 	publish   func(context.Context, string, []byte) (securefs.CommitBoundary, error)
-	withLock  func(context.Context, string, func(context.Context) Result) (Result, error)
+	withLock  func(context.Context, string, func(context.Context, configApplyTransaction) Result) (Result, error)
+}
+
+type configApplyTransaction struct {
+	directoryIdentity securefs.Identity
+	publish           func(context.Context, string, []byte) (securefs.CommitBoundary, error)
 }
 
 type installedConfigFilesystem struct {
@@ -51,10 +56,8 @@ func NewConfigApplyHandler() Handler {
 			return config.ReadDraftExcluding(path, excluded)
 		},
 		validate: config.ValidateReplacement,
-		publish: func(ctx context.Context, path string, document []byte) (securefs.CommitBoundary, error) {
-			return publishInstalledConfigUsing(ctx, path, document, filesystem)
-		},
-		withLock: func(ctx context.Context, path string, fn func(context.Context) Result) (Result, error) {
+		publish:  publishInstalledConfig,
+		withLock: func(ctx context.Context, path string, fn func(context.Context, configApplyTransaction) Result) (Result, error) {
 			return withInstalledConfigLockUsing(ctx, path, fn, filesystem)
 		},
 	})
@@ -80,8 +83,8 @@ func newConfigApplyHandler(deps configApplyDependencies) Handler {
 			return configApplyFailure("preflight_failed")
 		}
 
-		result, err := deps.withLock(ctx, path, func(lockedContext context.Context) Result {
-			return applyConfigLocked(lockedContext, invocation, path, deps)
+		result, err := deps.withLock(ctx, path, func(lockedContext context.Context, transaction configApplyTransaction) Result {
+			return applyConfigLocked(lockedContext, invocation, path, transaction, deps)
 		})
 		if err == nil {
 			return result
@@ -93,10 +96,17 @@ func newConfigApplyHandler(deps configApplyDependencies) Handler {
 	}
 }
 
-func applyConfigLocked(ctx context.Context, invocation cli.Invocation, path string, deps configApplyDependencies) Result {
+func applyConfigLocked(ctx context.Context, invocation cli.Invocation, path string, transaction configApplyTransaction, deps configApplyDependencies) Result {
+	if transaction.directoryIdentity != (securefs.Identity{}) && transaction.publish == nil {
+		return configApplyFailure("preflight_failed")
+	}
 	current, err := deps.load(path, config.ValidateOperational)
 	if err != nil {
 		return configApplyInstalledFailure(err)
+	}
+	if !configApplyLoadedInDirectory(current, transaction.directoryIdentity) {
+		_ = current.Close()
+		return configApplyFailure("installed_path_security stage=" + string(config.PathStageConfigDirectory))
 	}
 
 	draft, err := deps.readDraft(invocation.ConfigInput, current.ConfigDirectoryIdentity())
@@ -122,11 +132,15 @@ func applyConfigLocked(ctx context.Context, invocation cli.Invocation, path stri
 	if err := current.Close(); err != nil {
 		return configApplyFailure("preflight_failed")
 	}
+	publish := deps.publish
+	if transaction.publish != nil {
+		publish = transaction.publish
+	}
 
-	boundary, err := deps.publish(ctx, path, draft.Document())
+	boundary, err := publish(ctx, path, draft.Document())
 	if err != nil || !commitComplete(boundary) {
 		if boundary.NamespacePublished {
-			if !restoreInstalledConfig(ctx, deps, path, previous) {
+			if !restoreInstalledConfig(ctx, deps, publish, path, previous, transaction.directoryIdentity) {
 				return configApplyFailure("rollback_failed")
 			}
 			return configApplyFailure("publish_failed rollback=restored")
@@ -138,6 +152,9 @@ func applyConfigLocked(ctx context.Context, invocation cli.Invocation, path stri
 	}
 
 	candidate, err := deps.load(path, config.ValidateOperational)
+	if err == nil && !configApplyLoadedInDirectory(candidate, transaction.directoryIdentity) {
+		err = installedPathError{stage: config.PathStageConfigDirectory, err: securefs.ErrIdentityChanged}
+	}
 	if err == nil && !bytes.Equal(candidate.Document(), draft.Document()) {
 		err = errors.New("published configuration bytes differ")
 	}
@@ -147,7 +164,7 @@ func applyConfigLocked(ctx context.Context, invocation cli.Invocation, path stri
 		}
 	}
 	if err != nil {
-		if !restoreInstalledConfig(ctx, deps, path, previous) {
+		if !restoreInstalledConfig(ctx, deps, publish, path, previous, transaction.directoryIdentity) {
 			return configApplyFailure("rollback_failed")
 		}
 		return configApplyFailure("post_publish_failed rollback=restored")
@@ -171,7 +188,7 @@ func installedConfigFilePolicy(policies config.SecurityPolicies) securefs.FilePo
 	return policy
 }
 
-func validateInstalledMutableOutput(path string, filesystem installedConfigFilesystem) (securefs.MutableRoot, string, securefs.FilePolicy, error) {
+func validateInstalledMutableOutput(path string, expectedDirectory securefs.Identity, filesystem installedConfigFilesystem) (securefs.MutableRoot, string, securefs.FilePolicy, error) {
 	policies, err := filesystem.securityPolicies()
 	if err != nil {
 		return nil, "", securefs.FilePolicy{}, err
@@ -189,15 +206,19 @@ func validateInstalledMutableOutput(path string, filesystem installedConfigFiles
 		}
 		return nil, "", securefs.FilePolicy{}, installedPathError{stage: stage, err: err}
 	}
+	if expectedDirectory != (securefs.Identity{}) && parent.Identity() != expectedDirectory {
+		_ = parent.Close()
+		return nil, "", securefs.FilePolicy{}, installedPathError{stage: config.PathStageConfigDirectory, err: securefs.ErrIdentityChanged}
+	}
 	return parent, name, policy, nil
 }
 
 func publishInstalledConfig(ctx context.Context, path string, document []byte) (securefs.CommitBoundary, error) {
-	return publishInstalledConfigUsing(ctx, path, document, productionInstalledConfigFilesystem())
+	return publishInstalledConfigUsing(ctx, path, document, securefs.Identity{}, productionInstalledConfigFilesystem())
 }
 
-func publishInstalledConfigUsing(ctx context.Context, path string, document []byte, filesystem installedConfigFilesystem) (securefs.CommitBoundary, error) {
-	parent, name, policy, err := validateInstalledMutableOutput(path, filesystem)
+func publishInstalledConfigUsing(ctx context.Context, path string, document []byte, expectedDirectory securefs.Identity, filesystem installedConfigFilesystem) (securefs.CommitBoundary, error) {
+	parent, name, policy, err := validateInstalledMutableOutput(path, expectedDirectory, filesystem)
 	if err != nil {
 		return securefs.CommitBoundary{}, err
 	}
@@ -212,19 +233,28 @@ func publishInstalledConfigUsing(ctx context.Context, path string, document []by
 	return boundary, nil
 }
 
-func withInstalledConfigLockUsing(ctx context.Context, path string, fn func(context.Context) Result, filesystem installedConfigFilesystem) (Result, error) {
-	parent, installedName, policy, err := validateInstalledMutableOutput(path, filesystem)
+func withInstalledConfigLockUsing(ctx context.Context, path string, fn func(context.Context, configApplyTransaction) Result, filesystem installedConfigFilesystem) (Result, error) {
+	parent, installedName, policy, err := validateInstalledMutableOutput(path, securefs.Identity{}, filesystem)
 	if err != nil {
 		return Result{}, err
 	}
 	defer parent.Close()
-	if sameConfigApplyPath(installedName, configApplyLockName) {
+	if configDirectoryLeafReserved(installedName) {
 		return Result{}, errConfigApplyReservedLockName
+	}
+	directoryIdentity := parent.Identity()
+	if directoryIdentity == (securefs.Identity{}) {
+		return Result{}, installedPathError{stage: config.PathStageConfigDirectory, err: securefs.ErrIdentityChanged}
 	}
 
 	var result Result
 	err = parent.WithExclusiveLock(ctx, configApplyLockName, policy, func(securefs.LockedFile) error {
-		result = fn(ctx)
+		result = fn(ctx, configApplyTransaction{
+			directoryIdentity: directoryIdentity,
+			publish: func(publishContext context.Context, publishPath string, document []byte) (securefs.CommitBoundary, error) {
+				return publishInstalledConfigUsing(publishContext, publishPath, document, directoryIdentity, filesystem)
+			},
+		})
 		return nil
 	})
 	if err != nil {
@@ -236,8 +266,8 @@ func withInstalledConfigLockUsing(ctx context.Context, path string, fn func(cont
 	return result, nil
 }
 
-func restoreInstalledConfig(ctx context.Context, deps configApplyDependencies, path string, previous []byte) bool {
-	boundary, err := deps.publish(context.WithoutCancel(ctx), path, previous)
+func restoreInstalledConfig(ctx context.Context, deps configApplyDependencies, publish func(context.Context, string, []byte) (securefs.CommitBoundary, error), path string, previous []byte, expectedDirectory securefs.Identity) bool {
+	boundary, err := publish(context.WithoutCancel(ctx), path, previous)
 	if err != nil || !commitComplete(boundary) {
 		return false
 	}
@@ -245,8 +275,12 @@ func restoreInstalledConfig(ctx context.Context, deps configApplyDependencies, p
 	if err != nil {
 		return false
 	}
-	equal := bytes.Equal(restored.Document(), previous)
+	equal := configApplyLoadedInDirectory(restored, expectedDirectory) && bytes.Equal(restored.Document(), previous)
 	return restored.Close() == nil && equal
+}
+
+func configApplyLoadedInDirectory(loaded *config.Loaded, expected securefs.Identity) bool {
+	return expected == (securefs.Identity{}) || loaded.ConfigDirectoryIdentity() == expected
 }
 
 func commitComplete(boundary securefs.CommitBoundary) bool {

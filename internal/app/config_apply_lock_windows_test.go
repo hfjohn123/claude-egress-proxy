@@ -3,6 +3,7 @@
 package app
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -10,6 +11,44 @@ import (
 	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
 	"golang.org/x/sys/windows"
 )
+
+func TestConfigApplyLockNameHasNoDistinctWindowsAlias(t *testing.T) {
+	base := t.TempDir()
+	control := filepath.Join(base, "config-apply-characterization.lock")
+	if err := os.WriteFile(control, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	controlShort := windowsShortPath(t, control)
+	if sameConfigApplyPath(controlShort, control) {
+		t.Skip("volume does not generate distinct 8.3 aliases")
+	}
+
+	lockPath := filepath.Join(base, configApplyLockName)
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shortName := filepath.Base(windowsShortPath(t, lockPath))
+	if !configDirectoryLeafReserved(shortName) {
+		t.Fatalf("lock name %q has unreserved alias %q", configApplyLockName, shortName)
+	}
+}
+
+func windowsShortPath(t *testing.T, path string) string {
+	t.Helper()
+	longPath, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]uint16, 32768)
+	length, err := windows.GetShortPathName(longPath, &buffer[0], uint32(len(buffer)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if length == 0 || length >= uint32(len(buffer)) {
+		t.Fatalf("invalid short-path length %d", length)
+	}
+	return windows.UTF16ToString(buffer[:length])
+}
 
 func TestInstalledConfigLockSerializesIndependentWindowsRoots(t *testing.T) {
 	token, err := windows.OpenCurrentProcessToken()

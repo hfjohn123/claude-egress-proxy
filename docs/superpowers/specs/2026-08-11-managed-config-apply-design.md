@@ -64,7 +64,9 @@ file ACL, so editors never need write access to the installed directory.
 1. Resolve the platform defaults and selected installed path.
 2. Acquire the installed directory's cross-process apply lock and hold it
    through validation, publication, verification, and any rollback. The lock
-   leaf is reserved and cannot also be selected as the installed config file.
+   leaf is reserved across every config-directory publisher and cannot also be
+   selected as the installed config or PAC output file. Retain the locked
+   directory identity and require every later path reopen to match it.
 3. Open and retain the installed configuration and state roots under the
    existing operational validation policy.
 4. Read a stable draft snapshot from its own pinned parent directory, rejecting
@@ -138,6 +140,8 @@ Add tests that prove:
    unchanged.
 10. Concurrent apply commands serialize the complete transaction and cannot
     overwrite or roll back another command's result.
+11. Directory replacement after lock acquisition is rejected before publication,
+    and no config-directory publisher can replace the reserved lock leaf.
 
 Run the repository's full required Go formatting, module, test, vet, and module
 listing gates before commit. After the new binary passes, deploy it during the

@@ -30,6 +30,28 @@ func TestPACPathFailuresMapToFixedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestPublishPACRejectsReservedConfigApplyLockLeaf(t *testing.T) {
+	root := &fakeConfigApplyMutableRoot{}
+	access := securefs.IdentityOnlyPermissions()
+	filesystem := installedConfigFilesystem{
+		securityPolicies: func() (config.SecurityPolicies, error) {
+			return config.SecurityPolicies{
+				ConfigDirectory: securefs.RootPolicy{Access: access},
+				ConfigFile:      securefs.FilePolicy{Presence: securefs.Required, Kind: securefs.RegularFile, Access: access, MaxBytes: 1},
+			}, nil
+		},
+		checkoutIdentity: func() (securefs.Identity, error) { return securefs.Identity{}, nil },
+		validateMutableOutput: func(string, securefs.Identity, securefs.RootPolicy, securefs.FilePolicy) (securefs.MutableRoot, string, securefs.FileState, error) {
+			return root, configApplyLockName, securefs.FileState{}, nil
+		},
+	}
+
+	err := publishPACUsing(context.Background(), cli.Invocation{PACOutput: filepath.Join(t.TempDir(), configApplyLockName)}, []byte("PAC"), filesystem)
+	if !errors.Is(err, securefs.ErrUnsafePath) || root.publishName != "" {
+		t.Fatalf("reserved PAC output err=%v root=%+v", err, root)
+	}
+}
+
 type pacLoadedStub struct{ cfg config.Config }
 
 func (s pacLoadedStub) Config() config.Config { return s.cfg }

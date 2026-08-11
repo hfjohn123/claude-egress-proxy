@@ -499,7 +499,11 @@ func newPACHandler(deps pacDependencies) Handler {
 }
 
 func publishPAC(ctx context.Context, invocation cli.Invocation, body []byte) error {
-	policies, err := config.PlatformSecurityPolicies()
+	return publishPACUsing(ctx, invocation, body, productionInstalledConfigFilesystem())
+}
+
+func publishPACUsing(ctx context.Context, invocation cli.Invocation, body []byte, filesystem installedConfigFilesystem) error {
+	policies, err := filesystem.securityPolicies()
 	if err != nil {
 		return err
 	}
@@ -507,15 +511,18 @@ func publishPAC(ctx context.Context, invocation cli.Invocation, body []byte) err
 	output.Presence = securefs.Optional
 	output.Kind = securefs.RegularFile
 	output.MaxBytes = int64(contract.V1().PACBytes)
-	checkout, err := config.CheckoutIdentity()
+	checkout, err := filesystem.checkoutIdentity()
 	if err != nil {
 		return securefs.ErrIdentityChanged
 	}
-	parent, name, _, err := securefs.ValidateMutableOutput(invocation.PACOutput, checkout, policies.ConfigDirectory, output)
+	parent, name, _, err := filesystem.validateMutableOutput(invocation.PACOutput, checkout, policies.ConfigDirectory, output)
 	if err != nil {
 		return err
 	}
 	defer parent.Close()
+	if configDirectoryLeafReserved(name) {
+		return securefs.ErrUnsafePath
+	}
 	boundary, err := parent.PublishOutput(ctx, name, body, output)
 	if err != nil {
 		return err
@@ -524,6 +531,10 @@ func publishPAC(ctx context.Context, invocation cli.Invocation, body []byte) err
 		return securefs.ErrUnsupportedInspection
 	}
 	return nil
+}
+
+func configDirectoryLeafReserved(name string) bool {
+	return sameConfigApplyPath(name, configApplyLockName)
 }
 
 func configCode(err error) contract.DiagnosticCode {

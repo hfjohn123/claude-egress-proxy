@@ -221,12 +221,12 @@ func TestConfigApplyRunsCompleteTransactionUnderLock(t *testing.T) {
 			assertLocked("publish")
 			return securefs.CommitBoundary{NamespacePublished: true, TargetDurable: true}, nil
 		},
-		withLock: func(ctx context.Context, _ string, fn func(context.Context) Result) (Result, error) {
+		withLock: func(ctx context.Context, _ string, fn func(context.Context, configApplyTransaction) Result) (Result, error) {
 			if insideLock {
 				t.Fatal("nested config apply lock")
 			}
 			insideLock = true
-			result := fn(ctx)
+			result := fn(ctx, configApplyTransaction{})
 			insideLock = false
 			return result, nil
 		},
@@ -235,6 +235,64 @@ func TestConfigApplyRunsCompleteTransactionUnderLock(t *testing.T) {
 	result := handler(context.Background(), cli.Invocation{ConfigPath: filepath.Join(base, "installed", "config.yaml"), ConfigInput: filepath.Join(base, "draft", "draft.yaml")})
 	if result.ExitCode != 0 || loads != 2 || insideLock {
 		t.Fatalf("result=%+v loads=%d insideLock=%v", result, loads, insideLock)
+	}
+}
+
+func TestConfigApplyRejectsReopenedDirectoryOutsideLock(t *testing.T) {
+	base, current, _ := configApplyFixture(t)
+	lockedIdentity := configApplyTestIdentity(t)
+	draftRead := false
+	published := false
+	handler := newConfigApplyHandler(configApplyDependencies{
+		load: func(string, config.ValidationMode) (*config.Loaded, error) {
+			return loadConfigApplySnapshot(t, base, current)
+		},
+		readDraft: func(string, securefs.Identity) (config.Draft, error) {
+			draftRead = true
+			return config.Draft{}, nil
+		},
+		validate: func(*config.Loaded, config.Draft) error { return nil },
+		publish: func(context.Context, string, []byte) (securefs.CommitBoundary, error) {
+			published = true
+			return securefs.CommitBoundary{}, nil
+		},
+		withLock: func(ctx context.Context, _ string, fn func(context.Context, configApplyTransaction) Result) (Result, error) {
+			return fn(ctx, configApplyTransaction{
+				directoryIdentity: lockedIdentity,
+				publish: func(context.Context, string, []byte) (securefs.CommitBoundary, error) {
+					published = true
+					return securefs.CommitBoundary{}, nil
+				},
+			}), nil
+		},
+	})
+
+	result := handler(context.Background(), cli.Invocation{ConfigPath: filepath.Join(base, "installed", "config.yaml"), ConfigInput: filepath.Join(base, "draft", "draft.yaml")})
+	if result.ExitCode != 1 || string(result.Stderr) != "config apply error: installed_path_security stage=config_directory\n" || draftRead || published {
+		t.Fatalf("result=%+v draftRead=%v published=%v", result, draftRead, published)
+	}
+}
+
+func TestConfigApplyRejectsLockedTransactionWithoutBoundPublisher(t *testing.T) {
+	loaded := false
+	handler := newConfigApplyHandler(configApplyDependencies{
+		load: func(string, config.ValidationMode) (*config.Loaded, error) {
+			loaded = true
+			return nil, errors.New("unexpected load")
+		},
+		readDraft: func(string, securefs.Identity) (config.Draft, error) { return config.Draft{}, nil },
+		validate:  func(*config.Loaded, config.Draft) error { return nil },
+		publish: func(context.Context, string, []byte) (securefs.CommitBoundary, error) {
+			return securefs.CommitBoundary{}, nil
+		},
+		withLock: func(ctx context.Context, _ string, fn func(context.Context, configApplyTransaction) Result) (Result, error) {
+			return fn(ctx, configApplyTransaction{directoryIdentity: configApplyTestIdentity(t)}), nil
+		},
+	})
+	base := t.TempDir()
+	result := handler(context.Background(), cli.Invocation{ConfigPath: filepath.Join(base, "installed", "config.yaml"), ConfigInput: filepath.Join(base, "draft", "draft.yaml")})
+	if result.ExitCode != 1 || string(result.Stderr) != "config apply error: preflight_failed\n" || loaded {
+		t.Fatalf("result=%+v loaded=%v", result, loaded)
 	}
 }
 
@@ -269,7 +327,7 @@ func TestConfigApplySerializesConcurrentTransactions(t *testing.T) {
 		publish: func(context.Context, string, []byte) (securefs.CommitBoundary, error) {
 			return securefs.CommitBoundary{NamespacePublished: true, TargetDurable: true}, nil
 		},
-		withLock: func(ctx context.Context, _ string, fn func(context.Context) Result) (Result, error) {
+		withLock: func(ctx context.Context, _ string, fn func(context.Context, configApplyTransaction) Result) (Result, error) {
 			attempted <- struct{}{}
 			transactionMu.Lock()
 			defer transactionMu.Unlock()
@@ -284,7 +342,7 @@ func TestConfigApplySerializesConcurrentTransactions(t *testing.T) {
 			if entry == 1 {
 				<-releaseFirst
 			}
-			result := fn(ctx)
+			result := fn(ctx, configApplyTransaction{})
 			stateMu.Lock()
 			active--
 			stateMu.Unlock()
@@ -351,15 +409,38 @@ func TestPublishInstalledConfigComposesSecurityPolicies(t *testing.T) {
 		},
 	}
 
-	boundary, err := publishInstalledConfigUsing(context.Background(), path, document, filesystem)
+	boundary, err := publishInstalledConfigUsing(context.Background(), path, document, securefs.Identity{}, filesystem)
 	if err != nil || !commitComplete(boundary) || !validated || root.publishName != "config.yaml" || string(root.publishBody) != string(document) {
 		t.Fatalf("boundary=%+v err=%v validated=%v root=%+v", boundary, err, validated, root)
 	}
 	assertConfigApplyFilePolicy(t, root.publishPolicy, configAccess)
 }
 
+func TestPublishInstalledConfigRejectsDirectoryOutsideLock(t *testing.T) {
+	lockedIdentity := configApplyTestIdentity(t)
+	root := &fakeConfigApplyMutableRoot{identity: configApplyTestIdentity(t)}
+	access := securefs.IdentityOnlyPermissions()
+	filesystem := installedConfigFilesystem{
+		securityPolicies: func() (config.SecurityPolicies, error) {
+			return config.SecurityPolicies{
+				ConfigDirectory: securefs.RootPolicy{Access: access},
+				ConfigFile:      securefs.FilePolicy{Presence: securefs.Required, Kind: securefs.RegularFile, Access: access, MaxBytes: 1},
+			}, nil
+		},
+		checkoutIdentity: func() (securefs.Identity, error) { return securefs.Identity{}, nil },
+		validateMutableOutput: func(string, securefs.Identity, securefs.RootPolicy, securefs.FilePolicy) (securefs.MutableRoot, string, securefs.FileState, error) {
+			return root, "config.yaml", securefs.FileState{}, nil
+		},
+	}
+
+	_, err := publishInstalledConfigUsing(context.Background(), filepath.Join(t.TempDir(), "config.yaml"), []byte("replacement"), lockedIdentity, filesystem)
+	if stage, ok := installedPathStage(err); !ok || stage != config.PathStageConfigDirectory || root.publishName != "" {
+		t.Fatalf("publish mismatch stage=%q ok=%v err=%v root=%+v", stage, ok, err, root)
+	}
+}
+
 func TestInstalledConfigLockComposesSecurityPolicies(t *testing.T) {
-	root := &fakeConfigApplyMutableRoot{}
+	root := &fakeConfigApplyMutableRoot{identity: configApplyTestIdentity(t)}
 	access := securefs.IdentityOnlyPermissions()
 	filesystem := installedConfigFilesystem{
 		securityPolicies: func() (config.SecurityPolicies, error) {
@@ -373,19 +454,26 @@ func TestInstalledConfigLockComposesSecurityPolicies(t *testing.T) {
 			return root, "config.yaml", securefs.FileState{}, nil
 		},
 	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	called := false
-	result, err := withInstalledConfigLockUsing(context.Background(), filepath.Join(t.TempDir(), "config.yaml"), func(context.Context) Result {
+	result, err := withInstalledConfigLockUsing(context.Background(), path, func(ctx context.Context, transaction configApplyTransaction) Result {
 		called = true
+		if transaction.directoryIdentity != root.identity || transaction.publish == nil {
+			t.Fatalf("transaction=%+v root identity match=%v", transaction, transaction.directoryIdentity == root.identity)
+		}
+		if boundary, publishErr := transaction.publish(ctx, path, []byte("replacement")); publishErr != nil || !commitComplete(boundary) {
+			t.Fatalf("locked publisher boundary=%+v err=%v", boundary, publishErr)
+		}
 		return Result{Stdout: []byte("locked")}
 	}, filesystem)
-	if err != nil || !called || string(result.Stdout) != "locked" || root.lockName != configApplyLockName {
+	if err != nil || !called || string(result.Stdout) != "locked" || root.lockName != configApplyLockName || root.publishName != "config.yaml" {
 		t.Fatalf("result=%+v err=%v called=%v root=%+v", result, err, called, root)
 	}
 	assertConfigApplyFilePolicy(t, root.lockPolicy, access)
 }
 
 func TestInstalledConfigLockNeverUsesInstalledLeaf(t *testing.T) {
-	root := &fakeConfigApplyMutableRoot{}
+	root := &fakeConfigApplyMutableRoot{identity: configApplyTestIdentity(t)}
 	access := securefs.IdentityOnlyPermissions()
 	filesystem := installedConfigFilesystem{
 		securityPolicies: func() (config.SecurityPolicies, error) {
@@ -400,7 +488,7 @@ func TestInstalledConfigLockNeverUsesInstalledLeaf(t *testing.T) {
 		},
 	}
 	path := filepath.Join(t.TempDir(), configApplyLockName)
-	if _, err := withInstalledConfigLockUsing(context.Background(), path, func(context.Context) Result { return Result{} }, filesystem); err == nil {
+	if _, err := withInstalledConfigLockUsing(context.Background(), path, func(context.Context, configApplyTransaction) Result { return Result{} }, filesystem); err == nil {
 		t.Fatal("reserved installed leaf accepted")
 	}
 	if root.lockName != "" {
@@ -416,7 +504,7 @@ func TestConfigApplyReportsLockFailureAsInstalledDirectory(t *testing.T) {
 		publish: func(context.Context, string, []byte) (securefs.CommitBoundary, error) {
 			return securefs.CommitBoundary{}, nil
 		},
-		withLock: func(context.Context, string, func(context.Context) Result) (Result, error) {
+		withLock: func(context.Context, string, func(context.Context, configApplyTransaction) Result) (Result, error) {
 			return Result{}, installedPathError{stage: config.PathStageConfigDirectory, err: securefs.ErrUnsafePath}
 		},
 	})
@@ -428,7 +516,7 @@ func TestConfigApplyReportsLockFailureAsInstalledDirectory(t *testing.T) {
 }
 
 func TestInstalledConfigLockClassifiesNamespaceFailure(t *testing.T) {
-	root := &fakeConfigApplyMutableRoot{lockErr: securefs.ErrUnsafePath}
+	root := &fakeConfigApplyMutableRoot{identity: configApplyTestIdentity(t), lockErr: securefs.ErrUnsafePath}
 	access := securefs.IdentityOnlyPermissions()
 	filesystem := installedConfigFilesystem{
 		securityPolicies: func() (config.SecurityPolicies, error) {
@@ -442,7 +530,7 @@ func TestInstalledConfigLockClassifiesNamespaceFailure(t *testing.T) {
 			return root, "config.yaml", securefs.FileState{}, nil
 		},
 	}
-	_, err := withInstalledConfigLockUsing(context.Background(), filepath.Join(t.TempDir(), "config.yaml"), func(context.Context) Result { return Result{} }, filesystem)
+	_, err := withInstalledConfigLockUsing(context.Background(), filepath.Join(t.TempDir(), "config.yaml"), func(context.Context, configApplyTransaction) Result { return Result{} }, filesystem)
 	if stage, ok := installedPathStage(err); !ok || stage != config.PathStageConfigDirectory {
 		t.Fatalf("lock error stage=%q ok=%v err=%v", stage, ok, err)
 	}
@@ -608,6 +696,7 @@ func configApplyDocument(state, profile string) []byte {
 }
 
 type fakeConfigApplyMutableRoot struct {
+	identity      securefs.Identity
 	publishName   string
 	publishBody   []byte
 	publishPolicy securefs.FilePolicy
@@ -616,8 +705,8 @@ type fakeConfigApplyMutableRoot struct {
 	lockErr       error
 }
 
-func (*fakeConfigApplyMutableRoot) Identity() securefs.Identity { return securefs.Identity{} }
-func (*fakeConfigApplyMutableRoot) RecheckIdentity() error      { return nil }
+func (r *fakeConfigApplyMutableRoot) Identity() securefs.Identity { return r.identity }
+func (*fakeConfigApplyMutableRoot) RecheckIdentity() error        { return nil }
 func (*fakeConfigApplyMutableRoot) Inspect(string, securefs.FilePolicy) (securefs.FileState, error) {
 	return securefs.FileState{}, nil
 }
@@ -650,13 +739,26 @@ func assertConfigApplyFilePolicy(t *testing.T, policy securefs.FilePolicy, acces
 	}
 }
 
+func configApplyTestIdentity(t *testing.T) securefs.Identity {
+	t.Helper()
+	root, err := securefs.OpenRoot(t.TempDir(), securefs.RootPolicy{Access: securefs.IdentityOnlyPermissions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := root.Identity()
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return identity
+}
+
 func assertRealInstalledConfigLockSerializes(t *testing.T, path string, filesystem installedConfigFilesystem) {
 	t.Helper()
 	firstEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	firstDone := make(chan error, 1)
 	go func() {
-		_, err := withInstalledConfigLockUsing(context.Background(), path, func(context.Context) Result {
+		_, err := withInstalledConfigLockUsing(context.Background(), path, func(context.Context, configApplyTransaction) Result {
 			close(firstEntered)
 			<-releaseFirst
 			return Result{}
@@ -667,7 +769,7 @@ func assertRealInstalledConfigLockSerializes(t *testing.T, path string, filesyst
 
 	secondCalled := false
 	secondContext, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	_, secondErr := withInstalledConfigLockUsing(secondContext, path, func(context.Context) Result {
+	_, secondErr := withInstalledConfigLockUsing(secondContext, path, func(context.Context, configApplyTransaction) Result {
 		secondCalled = true
 		return Result{}
 	}, filesystem)
@@ -679,7 +781,7 @@ func assertRealInstalledConfigLockSerializes(t *testing.T, path string, filesyst
 	}
 
 	thirdCalled := false
-	_, thirdErr := withInstalledConfigLockUsing(context.Background(), path, func(context.Context) Result {
+	_, thirdErr := withInstalledConfigLockUsing(context.Background(), path, func(context.Context, configApplyTransaction) Result {
 		thirdCalled = true
 		return Result{}
 	}, filesystem)
@@ -692,6 +794,6 @@ func readConfigApplyDraft(path string, excluded securefs.Identity) (config.Draft
 	return config.ReadDraftExcluding(path, excluded)
 }
 
-func passthroughConfigApplyLock(ctx context.Context, _ string, fn func(context.Context) Result) (Result, error) {
-	return fn(ctx), nil
+func passthroughConfigApplyLock(ctx context.Context, _ string, fn func(context.Context, configApplyTransaction) Result) (Result, error) {
+	return fn(ctx, configApplyTransaction{}), nil
 }
