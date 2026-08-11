@@ -246,11 +246,11 @@ func initFailure(code contract.DiagnosticCode) Result {
 func ProductionDependencies() Dependencies {
 	checkout, err := config.CheckoutIdentity()
 	if err != nil {
-		return Dependencies{Serve: NewServeHandler(), Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, Credential: NewCredentialHandler(), PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler(), CheckHealth: NewHealthHandler(), CheckNetwork: NewNetworkHandler(), Service: NewServiceHandler()}
+		return Dependencies{Serve: NewServeHandler(), Init: func(context.Context, cli.Invocation) Result { return initFailure(contract.D004) }, Credential: NewCredentialHandler(), PAC: NewPACHandler(), ConfigApply: NewConfigApplyHandler(), CheckConfig: NewCheckConfigHandler(), CheckHealth: NewHealthHandler(), CheckNetwork: NewNetworkHandler(), Service: NewServiceHandler()}
 	}
 	return Dependencies{Serve: NewServeHandler(), Init: NewInitHandler(InitDependencies{Entropy: rand.Reader, Defaults: config.PlatformDefaults, Security: config.PlatformSecurityPolicies, Prepare: func(ctx context.Context) (service.Undo, error) {
 		return service.Prepare(ctx, service.NewPlatform(), service.Install)
-	}, Checkout: checkout}), Credential: NewCredentialHandler(), AdminToken: NewAdminTokenHandler(), PAC: NewPACHandler(), CheckConfig: NewCheckConfigHandler(), CheckHealth: NewHealthHandler(), CheckNetwork: NewNetworkHandler(), Service: NewServiceHandler()}
+	}, Checkout: checkout}), Credential: NewCredentialHandler(), AdminToken: NewAdminTokenHandler(), PAC: NewPACHandler(), ConfigApply: NewConfigApplyHandler(), CheckConfig: NewCheckConfigHandler(), CheckHealth: NewHealthHandler(), CheckNetwork: NewNetworkHandler(), Service: NewServiceHandler()}
 }
 
 func NewHealthHandler() Handler { return newHealthHandler(checkpkg.Health) }
