@@ -11,6 +11,8 @@ import (
 
 	"github.com/hfjohn123/claude-egress-proxy/internal/cli"
 	"github.com/hfjohn123/claude-egress-proxy/internal/config"
+	"github.com/hfjohn123/claude-egress-proxy/internal/contract"
+	"github.com/hfjohn123/claude-egress-proxy/internal/securefs"
 	"github.com/hfjohn123/claude-egress-proxy/internal/service"
 )
 
@@ -104,6 +106,46 @@ func TestCheckConfigLoadsSelectedPathAndClosesSnapshot(t *testing.T) {
 	result := h(context.Background(), cli.Invocation{Command: cli.CheckConfig, ConfigPath: "/selected/config.yaml"})
 	if result.ExitCode != 0 || seen != "/selected/config.yaml" || seenMode != config.ValidateOperational || !loaded.closed {
 		t.Fatalf("result=%+v path=%q mode=%v closed=%v", result, seen, seenMode, loaded.closed)
+	}
+}
+
+func TestCheckConfigAppendsNonSensitivePathStage(t *testing.T) {
+	p := securefs.IdentityOnlyPermissions()
+	base := t.TempDir()
+	root, err := securefs.OpenRoot(base, securefs.RootPolicy{Access: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := root.Identity()
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, staged := (config.Loader{CheckoutIdentity: checkout, Policies: config.SecurityPolicies{
+		ConfigDirectory: securefs.RootPolicy{Access: p},
+		ConfigFile:      securefs.FilePolicy{Presence: securefs.Required, Kind: securefs.RegularFile, Access: p, MaxBytes: int64(contract.V1().ConfigBytes)},
+	}}).Load(filepath.Join(base, "config.yaml"), config.ValidatePure)
+	if staged == nil {
+		t.Fatal("expected staged path error")
+	}
+	h := newCheckConfigHandler(checkConfigDependencies{
+		load: func(string, config.ValidationMode) (pacLoaded, error) { return nil, staged },
+	})
+	result := h(context.Background(), cli.Invocation{Command: cli.CheckConfig, ConfigPath: "selected"})
+	want := append(append([]byte(nil), contract.Fatal(contract.D004)...), []byte("path_stage=config_directory\n")...)
+	if result.ExitCode != 1 || string(result.Stderr) != string(want) {
+		t.Fatalf("result=%+v stderr=%q", result, result.Stderr)
+	}
+}
+
+func TestCheckConfigLeavesUnstagedFatalDiagnosticUnchanged(t *testing.T) {
+	h := newCheckConfigHandler(checkConfigDependencies{
+		load: func(string, config.ValidationMode) (pacLoaded, error) {
+			return nil, diagnosticError{code: contract.D004}
+		},
+	})
+	result := h(context.Background(), cli.Invocation{Command: cli.CheckConfig, ConfigPath: "selected"})
+	if result.ExitCode != 1 || string(result.Stderr) != string(contract.Fatal(contract.D004)) {
+		t.Fatalf("result=%+v stderr=%q", result, result.Stderr)
 	}
 }
 

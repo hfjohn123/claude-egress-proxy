@@ -381,10 +381,29 @@ func newCheckConfigHandler(deps checkConfigDependencies) Handler {
 		}
 		loaded, err := deps.load(path, config.ValidateOperational)
 		if err != nil {
-			return initFailure(configCode(err))
+			return checkConfigFailure(err)
 		}
 		defer loaded.Close()
 		return Result{Stdout: checkConfigDiagnostics(loaded.Config())}
+	}
+}
+
+func checkConfigFailure(err error) Result {
+	result := initFailure(configCode(err))
+	stage, ok := config.PathStageOf(err)
+	if !ok || !validCheckConfigStage(stage) {
+		return result
+	}
+	result.Stderr = append(result.Stderr, []byte("path_stage="+stage+"\n")...)
+	return result
+}
+
+func validCheckConfigStage(stage string) bool {
+	switch stage {
+	case "config_directory", "config_file", "state_directory":
+		return true
+	default:
+		return false
 	}
 }
 
