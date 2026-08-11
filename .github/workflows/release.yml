@@ -133,6 +133,8 @@ jobs:
       attestations: write
       id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { fetch-depth: 0 }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with: { name: release-binaries, path: out/release }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -143,6 +145,9 @@ jobs:
         with: { name: scan-amd64, path: out/scan/amd64 }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with: { name: scan-arm64, path: out/scan/arm64 }
+      - name: namespace scan release assets
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/prepare-release-evidence.ps1 -ScanRoot out/scan -OutputDirectory out/scan-release
       - name: extract embedded SPDX attestations
         shell: bash
         run: |
@@ -201,4 +206,4 @@ jobs:
             out/release/*
             out/release/sbom/*.intoto.json
             out/oci/**/*.tar
-            out/scan/**/*.json
+            out/scan-release/*.json

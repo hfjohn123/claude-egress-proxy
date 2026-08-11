@@ -59,6 +59,19 @@ func TestWorkflowPolicy(t *testing.T) {
 	}
 }
 
+func TestReleaseWorkflowNamespacesScanAssets(t *testing.T) {
+	release := read(t, ".github/workflows/release.yml")
+	requireAll(t, release,
+		"scripts/prepare-release-evidence.ps1",
+		"-ScanRoot out/scan",
+		"-OutputDirectory out/scan-release",
+		"out/scan-release/*.json",
+	)
+	if strings.Contains(release, "out/scan/**/*.json") {
+		t.Fatal("draft release uploads architecture scan reports with colliding basenames")
+	}
+}
+
 func TestLocalScriptPolicy(t *testing.T) {
 	local := read(t, "scripts/verify-local.ps1")
 	requireAll(t, local, "$ErrorActionPreference = 'Stop'", "$PSNativeCommandUseErrorActionPreference = $true", "function Invoke-CheckedNative", "gofmt", "'generate', './...'", "verify-generated.ps1", "'mod', 'tidy'", "'diff', '--exit-code', '--', 'go.mod', 'go.sum'", "'vet', './...'", "'test', './...', '-count=1'", "-tags=cep_testcontrol", "CEP_TEST_BINARY", "finally", "'test', '-tags=resource', './integration/resource', '-count=1', '-timeout=25m', '-v'", "FuzzAuthority", "FuzzCredentialDecode", "FuzzBasicVerifier", "FuzzFramingValues", "verify-public-data.ps1", "verify-secrets.ps1", "verify-release.ps1", "govulncheck@v1.6.0", "CEP_LOCAL_VERIFICATION_OK")
