@@ -6,19 +6,19 @@ Generated from `policy/profiles.yaml`. Source: `https://code.claude.com/docs/en/
 
 | Rule | Values |
 | --- | --- |
-| exact hosts | api.anthropic.com<br>bridge.claudeusercontent.com<br>claude.ai<br>claude.com<br>code.claude.com<br>downloads.claude.ai<br>mcp-proxy.anthropic.com<br>platform.claude.com |
-| suffixes |  |
+| exact hosts | api.anthropic.com<br>bridge.claudeusercontent.com<br>claude.com<br>code.claude.com<br>downloads.claude.ai<br>mcp-proxy.anthropic.com<br>platform.claude.com |
+| suffixes | claude.ai |
 
 ## `web-desktop`
 
 | Rule | Values |
 | --- | --- |
-| exact hosts | api.anthropic.com<br>assets-proxy.anthropic.com<br>claude.ai<br>claude.com<br>mcp-proxy.anthropic.com<br>platform.claude.com |
-| suffixes | claudeusercontent.com |
+| exact hosts | api.anthropic.com<br>assets-proxy.anthropic.com<br>claude.com<br>mcp-proxy.anthropic.com<br>platform.claude.com |
+| suffixes | claude.ai<br>claudeusercontent.com |
 
 ## `all`
 
 | Rule | Values |
 | --- | --- |
-| exact hosts | api.anthropic.com<br>assets-proxy.anthropic.com<br>bridge.claudeusercontent.com<br>claude.ai<br>claude.com<br>code.claude.com<br>downloads.claude.ai<br>mcp-proxy.anthropic.com<br>platform.claude.com |
-| suffixes | claudeusercontent.com |
+| exact hosts | api.anthropic.com<br>assets-proxy.anthropic.com<br>bridge.claudeusercontent.com<br>claude.com<br>code.claude.com<br>downloads.claude.ai<br>mcp-proxy.anthropic.com<br>platform.claude.com |
+| suffixes | claude.ai<br>claudeusercontent.com |
