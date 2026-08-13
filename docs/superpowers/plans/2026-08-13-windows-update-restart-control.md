@@ -49,12 +49,12 @@ Expected: exit 1 with `missing apply script`.
 Apply writes these exact values:
 
 ```powershell
-Set-ItemProperty $windowsUpdateKey SetActiveHours 1 -Type DWord
-Set-ItemProperty $windowsUpdateKey ActiveHoursStart 6 -Type DWord
-Set-ItemProperty $windowsUpdateKey ActiveHoursEnd 0 -Type DWord
-Set-ItemProperty $auKey AUOptions 2 -Type DWord
-Set-ItemProperty $auKey NoAutoRebootWithLoggedOnUsers 1 -Type DWord
-Set-ItemProperty $auKey AlwaysAutoRebootAtScheduledTime 0 -Type DWord
+New-ItemProperty $windowsUpdateKey SetActiveHours -Value 1 -PropertyType DWord -Force
+New-ItemProperty $windowsUpdateKey ActiveHoursStart -Value 6 -PropertyType DWord -Force
+New-ItemProperty $windowsUpdateKey ActiveHoursEnd -Value 0 -PropertyType DWord -Force
+New-ItemProperty $auKey AUOptions -Value 2 -PropertyType DWord -Force
+New-ItemProperty $auKey NoAutoRebootWithLoggedOnUsers -Value 1 -PropertyType DWord -Force
+New-ItemProperty $auKey AlwaysAutoRebootAtScheduledTime -Value 0 -PropertyType DWord -Force
 ```
 
 The manifest records `policy_key_existed`, optional export path, and UTC creation timestamp. Verification emits only closed fields and the manifest path. Rollback requires elevation, validates the manifest is under the fixed backup directory, removes the exact policy subtree, imports the snapshot only when it existed, and emits closed fields.
