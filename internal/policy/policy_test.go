@@ -57,3 +57,31 @@ func TestBuiltInProfilesMatchClaudeAIRootAndArbitrarySubdomains(t *testing.T) {
 		}
 	}
 }
+
+func TestBuiltInAnthropicWebSuffixBoundaries(t *testing.T) {
+	for _, profile := range []string{"web-desktop", "all"} {
+		p, err := Load(profile, CustomRules{})
+		if err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+		for _, host := range []string{"anthropic.com", "www.anthropic.com", "future.cdn.anthropic.com", "claude.com", "support.claude.com", "future.web.claude.com"} {
+			if !p.MatchHost(host) {
+				t.Fatalf("profile %s rejected %s", profile, host)
+			}
+		}
+		for _, host := range []string{"evilanthropic.com", "evilclaude.com", "WWW.ANTHROPIC.COM"} {
+			if p.MatchHost(host) {
+				t.Fatalf("profile %s accepted %s", profile, host)
+			}
+		}
+	}
+	code, err := Load("code", CustomRules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"www.anthropic.com", "support.claude.com"} {
+		if code.MatchHost(host) {
+			t.Fatalf("code accepted web-only %s", host)
+		}
+	}
+}

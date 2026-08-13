@@ -16,14 +16,11 @@ profiles:
     suffixes:
       - claude.ai
   web-desktop:
-    exact_hosts:
-      - api.anthropic.com
-      - assets-proxy.anthropic.com
-      - claude.com
-      - mcp-proxy.anthropic.com
-      - platform.claude.com
+    exact_hosts: []
     suffixes:
+      - anthropic.com
       - claude.ai
+      - claude.com
       - claudeusercontent.com
   all:
     union:
