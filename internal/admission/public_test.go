@@ -122,6 +122,33 @@ func TestPublicExpiredActivePrefixRenewsWithoutReset(t *testing.T) {
 	}
 }
 
+func TestPublicMappedPrefixAllowsThirtyTwoActive(t *testing.T) {
+	clock := newTestClock(time.Unix(0, 0))
+	p := NewPublic(clock)
+	prefix := netip.MustParsePrefix("198.51.100.32/32")
+	leases := make([]PublicLease, 0, 32)
+	for i := range 32 {
+		if i >= p.limits.MappedPrefixBurst {
+			clock.Advance(time.Second)
+		}
+		lease, decision := p.Acquire(prefix)
+		if !decision.Allowed() {
+			t.Fatalf("acquire %d = %v, want allowed", i+1, decision)
+		}
+		leases = append(leases, lease)
+	}
+	clock.Advance(time.Second)
+	if _, decision := p.Acquire(prefix); decision != DecisionThrottled {
+		t.Fatalf("acquire 33 = %v, want throttled", decision)
+	}
+	for i := range leases {
+		leases[i].Release()
+	}
+	if got := p.Active(); got != 0 {
+		t.Fatalf("active after release = %d, want 0", got)
+	}
+}
+
 type testClock struct{ now time.Time }
 
 func newTestClock(now time.Time) *testClock                { return &testClock{now: now} }
