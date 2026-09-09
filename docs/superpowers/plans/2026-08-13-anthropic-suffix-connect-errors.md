@@ -77,7 +77,7 @@
 
 - [ ] Run `gofmt` on every modified Go file, `go run ./internal/tools/profilegen -check`, and `git diff --check`.
 - [ ] Run `go mod download`, `go mod verify`, `go test ./...`, `go vet ./...`, and `go list ./...`; require every command to exit 0.
-- [ ] Build with `go build -trimpath -o C:\Users\hfjoh\Documents\Codex\2026-08-11\de\work\build\claude-egress-proxy-<commit>.exe ./cmd/claude-egress-proxy`.
+- [ ] Build with `go build -trimpath -o .\build\claude-egress-proxy-<commit>.exe ./cmd/claude-egress-proxy`.
 - [ ] Compute and record the binary SHA-256 digest.
 
 ---
