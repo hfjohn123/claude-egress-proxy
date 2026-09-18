@@ -8,22 +8,19 @@ profiles:
     exact_hosts:
       - api.anthropic.com
       - bridge.claudeusercontent.com
-      - claude.ai
       - claude.com
       - code.claude.com
       - downloads.claude.ai
       - mcp-proxy.anthropic.com
       - platform.claude.com
-    suffixes: []
+    suffixes:
+      - claude.ai
   web-desktop:
-    exact_hosts:
-      - api.anthropic.com
-      - assets-proxy.anthropic.com
+    exact_hosts: []
+    suffixes:
+      - anthropic.com
       - claude.ai
       - claude.com
-      - mcp-proxy.anthropic.com
-      - platform.claude.com
-    suffixes:
       - claudeusercontent.com
   all:
     union:

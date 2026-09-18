@@ -13,7 +13,7 @@ func TestLoadNormalizesAndKeepsPublicRulesPrivate(t *testing.T) {
 	if !p.MatchHost("xn--bcher-kva.example") || !p.MatchHost("x.files.claude.ai") {
 		t.Fatal("normalized custom rule did not match")
 	}
-	if p.MatchHost("evilfiles.claude.ai") || p.MatchHost("CLAUDE.AI") {
+	if p.MatchHost("evilclaude.ai") || p.MatchHost("CLAUDE.AI") {
 		t.Fatal("noncanonical or deceptive host matched")
 	}
 	for _, h := range p.BuiltInRules().ExactHosts() {
@@ -37,6 +37,51 @@ func TestLoadRejectsInvalidCustomRules(t *testing.T) {
 		_, err := Load("code", tc.rules)
 		if !errors.Is(err, tc.want) {
 			t.Fatalf("%s = %v, want %v", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestBuiltInProfilesMatchClaudeAIRootAndArbitrarySubdomains(t *testing.T) {
+	for _, profile := range []string{"code", "web-desktop", "all"} {
+		p, err := Load(profile, CustomRules{})
+		if err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+		for _, host := range []string{"claude.ai", "a.claude.ai", "a-cdn.claude.ai", "assets.claude.ai", "nested.assets.claude.ai"} {
+			if !p.MatchHost(host) {
+				t.Fatalf("profile %s did not match %s", profile, host)
+			}
+		}
+		if p.MatchHost("evilclaude.ai") {
+			t.Fatalf("profile %s matched deceptive adjacent host", profile)
+		}
+	}
+}
+
+func TestBuiltInAnthropicWebSuffixBoundaries(t *testing.T) {
+	for _, profile := range []string{"web-desktop", "all"} {
+		p, err := Load(profile, CustomRules{})
+		if err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+		for _, host := range []string{"anthropic.com", "www.anthropic.com", "future.cdn.anthropic.com", "claude.com", "support.claude.com", "future.web.claude.com"} {
+			if !p.MatchHost(host) {
+				t.Fatalf("profile %s rejected %s", profile, host)
+			}
+		}
+		for _, host := range []string{"evilanthropic.com", "evilclaude.com", "WWW.ANTHROPIC.COM"} {
+			if p.MatchHost(host) {
+				t.Fatalf("profile %s accepted %s", profile, host)
+			}
+		}
+	}
+	code, err := Load("code", CustomRules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"www.anthropic.com", "support.claude.com"} {
+		if code.MatchHost(host) {
+			t.Fatalf("code accepted web-only %s", host)
 		}
 	}
 }

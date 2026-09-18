@@ -17,8 +17,8 @@ func sortedUnique(in []string) []string {
 	return out
 }
 func generatedProfile(name string) (Rules, bool) {
-	code := Rules{exactHosts: []string{"api.anthropic.com", "bridge.claudeusercontent.com", "claude.ai", "claude.com", "code.claude.com", "downloads.claude.ai", "mcp-proxy.anthropic.com", "platform.claude.com"}, suffixes: []string{}}
-	web := Rules{exactHosts: []string{"api.anthropic.com", "assets-proxy.anthropic.com", "claude.ai", "claude.com", "mcp-proxy.anthropic.com", "platform.claude.com"}, suffixes: []string{"claudeusercontent.com"}}
+	code := Rules{exactHosts: []string{"api.anthropic.com", "bridge.claudeusercontent.com", "claude.com", "code.claude.com", "downloads.claude.ai", "mcp-proxy.anthropic.com", "platform.claude.com"}, suffixes: []string{"claude.ai"}}
+	web := Rules{exactHosts: []string{}, suffixes: []string{"anthropic.com", "claude.ai", "claude.com", "claudeusercontent.com"}}
 	switch name {
 	case "code":
 		return code, true

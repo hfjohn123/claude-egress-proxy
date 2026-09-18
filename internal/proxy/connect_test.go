@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,10 @@ func (*recordingTunnel) Context() context.Context { return context.Background() 
 type alwaysFailWriter struct{}
 
 func (alwaysFailWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 type countingPublicSelf struct{ calls uint64 }
 
@@ -95,6 +100,27 @@ func TestEstablishedTunnelWriteFailureReleasesCanonicalOutcomeOnce(t *testing.T)
 	relayEstablished(tunnel, client, rw, origin, time.Second, 0)
 	if tunnel.releases != 1 || tunnel.result.String() != "io_error" {
 		t.Fatalf("release count=%d result=%s", tunnel.releases, tunnel.result)
+	}
+}
+
+func TestWriteFrameThenReleaseOrdersCleanupAfterResponse(t *testing.T) {
+	var events []string
+	rw := bufio.NewReadWriter(bufio.NewReader(bytes.NewReader(nil)), bufio.NewWriter(writerFunc(func(p []byte) (int, error) {
+		events = append(events, "write")
+		return len(p), nil
+	})))
+	writeFrameThenRelease(rw, wire.FrameBadGateway, func() { events = append(events, "release") })
+	if got := strings.Join(events, ","); got != "write,release" {
+		t.Fatalf("events=%s", got)
+	}
+}
+
+func TestWriteFrameThenReleaseStillReleasesAfterWriteFailure(t *testing.T) {
+	releases := 0
+	rw := bufio.NewReadWriter(bufio.NewReader(bytes.NewReader(nil)), bufio.NewWriter(alwaysFailWriter{}))
+	writeFrameThenRelease(rw, wire.FrameBadGateway, func() { releases++ })
+	if releases != 1 {
+		t.Fatalf("releases=%d", releases)
 	}
 }
 

@@ -68,8 +68,7 @@ func newAdminTokenHandler(deps adminTokenDependencies) Handler {
 			return initFailure(adminTokenCode(err))
 		}
 		defer root.Close()
-		p := policies.ConfigFile
-		p.Presence, p.Kind, p.MaxBytes = securefs.Optional, securefs.RegularFile, int64(contract.V1().StoreBytes)
+		p := adminTokenArtifactPolicy(policies)
 		store, err := admintoken.OpenStore(root, loaded.Config().InstanceID(), p)
 		if err != nil {
 			return initFailure(contract.D006)
@@ -80,6 +79,12 @@ func newAdminTokenHandler(deps adminTokenDependencies) Handler {
 		}
 		return Result{ExitCode: 0, Stdout: []byte("secret=" + base64.RawURLEncoding.EncodeToString(secret[:]) + "\nstate=rotated\n"), OutputFailed: []byte("admin-token error: output_failed\n")}
 	}
+}
+
+func adminTokenArtifactPolicy(policies config.SecurityPolicies) securefs.FilePolicy {
+	p := policies.StateFile
+	p.Presence, p.Kind, p.MaxBytes = securefs.Optional, securefs.RegularFile, int64(contract.V1().StoreBytes)
+	return p
 }
 
 func adminTokenCode(err error) contract.DiagnosticCode {

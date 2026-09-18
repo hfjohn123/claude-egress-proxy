@@ -86,6 +86,49 @@ func TestTransferRejectsRepeatedHandoff(t *testing.T) {
 	}
 }
 
+func TestTransferRejectionDefersReleaseToCaller(t *testing.T) {
+	c := NewCoordinator(credential.Verifier{}, nil)
+	h := newHandoff(c, &countLease{}, &attempt{})
+	client, peer := net.Pipe()
+	defer peer.Close()
+	if err := h.Attach(client, bufio.NewReadWriter(bufio.NewReader(client), bufio.NewWriter(client))); err != nil {
+		t.Fatal(err)
+	}
+	c.handoffs[h] = struct{}{}
+	c.draining = true
+	if _, got := c.Transfer(h); got.String() != "draining" {
+		t.Fatalf("transfer result=%s", got)
+	}
+	if h.released || len(c.handoffs) != 1 {
+		t.Fatalf("transfer pre-released handoff: released=%v handoffs=%d", h.released, len(c.handoffs))
+	}
+	if !h.Release() || !h.released || len(c.handoffs) != 0 {
+		t.Fatalf("caller release failed: released=%v handoffs=%d", h.released, len(c.handoffs))
+	}
+}
+
+func TestCommitRejectionDefersReleaseToCaller(t *testing.T) {
+	c := NewCoordinator(credential.Verifier{}, nil)
+	h := newHandoff(c, &countLease{}, &attempt{})
+	h.attached, h.transferred = true, true
+	c.handoffs[h] = struct{}{}
+	r := &reservation{coordinator: c, handoff: h}
+	c.pending[r] = struct{}{}
+	c.draining = true
+	origin, peer := net.Pipe()
+	defer peer.Close()
+	defer origin.Close()
+	if _, got := c.Commit(r, origin); got.String() != "draining" {
+		t.Fatalf("commit result=%s", got)
+	}
+	if r.released || h.released || len(c.pending) != 1 {
+		t.Fatalf("commit pre-released reservation: reservation=%v handoff=%v pending=%d", r.released, h.released, len(c.pending))
+	}
+	if !r.Release(connect("draining")) || !r.released || !h.released || len(c.pending) != 0 {
+		t.Fatalf("caller release failed: reservation=%v handoff=%v pending=%d", r.released, h.released, len(c.pending))
+	}
+}
+
 func TestBeginFixedAllowsAlreadyAdmittedResponseDuringDrain(t *testing.T) {
 	c := NewCoordinator(credential.Verifier{}, nil)
 	c.BeginDrain()

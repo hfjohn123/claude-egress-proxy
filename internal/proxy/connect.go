@@ -212,10 +212,8 @@ func servePublic(cfg PublicConfig, w http.ResponseWriter, r *http.Request) {
 	}
 	reservation, result := cfg.Coordinator.Transfer(handoff)
 	if result.String() != "established" {
-		handoff.Release()
 		recordSetup(cfg, result, started)
-		_ = writeFrame(rw, wire.FrameServiceUnavailable)
-		_ = conn.Close()
+		writeFrameThenRelease(rw, wire.FrameServiceUnavailable, func() { handoff.Release() })
 		return
 	}
 	ctx, cancel := context.WithTimeout(reservation.Context(), 10*time.Second)
@@ -223,27 +221,21 @@ func servePublic(cfg PublicConfig, w http.ResponseWriter, r *http.Request) {
 	self, ok := publicSelfForSetup(ctx, cfg)
 	if !ok {
 		result := resultFor("self_address_state_unavailable")
-		reservation.Release(result)
 		recordSetup(cfg, result, started)
-		_ = writeFrame(rw, wire.FrameServiceUnavailable)
-		_ = conn.Close()
+		writeFrameThenRelease(rw, wire.FrameServiceUnavailable, func() { reservation.Release(result) })
 		return
 	}
 	if cfg.Resolver == nil {
 		result := resultFor("dns_failed")
-		reservation.Release(result)
 		recordSetup(cfg, result, started)
-		_ = writeFrame(rw, wire.FrameBadGateway)
-		_ = conn.Close()
+		writeFrameThenRelease(rw, wire.FrameBadGateway, func() { reservation.Release(result) })
 		return
 	}
 	answers, err := cfg.Resolver.LookupA(ctx, authority.Host())
 	if err != nil {
 		result := resultFor("dns_failed")
-		reservation.Release(result)
 		recordSetup(cfg, result, started)
-		_ = writeFrame(rw, wire.FrameBadGateway)
-		_ = conn.Close()
+		writeFrameThenRelease(rw, wire.FrameBadGateway, func() { reservation.Release(result) })
 		return
 	}
 	dialer := cfg.Dialer
@@ -258,18 +250,15 @@ func servePublic(cfg PublicConfig, w http.ResponseWriter, r *http.Request) {
 		} else if errors.Is(err, network.ErrUnsafeAnswer) || errors.Is(err, network.ErrSelfAddress) {
 			result, frame = resultFor("address_denied"), wire.FrameForbidden
 		}
-		reservation.Release(result)
 		recordSetup(cfg, result, started)
-		_ = writeFrame(rw, frame)
-		_ = conn.Close()
+		writeFrameThenRelease(rw, frame, func() { reservation.Release(result) })
 		return
 	}
 	tunnel, result := cfg.Coordinator.Commit(reservation, origin)
 	if result.String() != "established" {
 		recordSetup(cfg, result, started)
 		_ = origin.Close()
-		_ = writeFrame(rw, frameFor(result.String()))
-		_ = conn.Close()
+		writeFrameThenRelease(rw, frameFor(result.String()), func() { reservation.Release(result) })
 		return
 	}
 	recordSetup(cfg, result, started)
@@ -459,6 +448,11 @@ func writeFrame(rw *bufio.ReadWriter, frame wire.Frame) error {
 		return err
 	}
 	return rw.Flush()
+}
+
+func writeFrameThenRelease(rw *bufio.ReadWriter, frame wire.Frame, release func()) {
+	_ = writeFrame(rw, frame)
+	release()
 }
 func resultFor(s string) contract.ConnectResult {
 	r, ok := contract.ParseConnectResult(s)

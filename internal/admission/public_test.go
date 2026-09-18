@@ -80,6 +80,75 @@ func TestPublicCopiedLeaseReleasesExactlyOnce(t *testing.T) {
 	other.Release()
 }
 
+func TestPublicExpiredActivePrefixRenewsWithoutReset(t *testing.T) {
+	clock := newTestClock(time.Unix(0, 0))
+	p := NewPublic(clock)
+	p.limits.LimiterEntryTTL = time.Minute
+	p.limits.MappedPrefixRatePerSecond = 0
+	p.mapped.ttl = time.Minute
+	prefix := netip.MustParsePrefix("198.51.100.20/32")
+	first, decision := p.Acquire(prefix)
+	if !decision.Allowed() {
+		t.Fatal(decision)
+	}
+	entry := p.mapped.entries[prefix]
+	if entry == nil {
+		t.Fatal("mapped entry missing")
+	}
+	generation := entry.generation
+	tokens := entry.bucket.tokens
+	originalExpiry := entry.expires
+	clock.Advance(time.Minute)
+	second, decision := p.Acquire(prefix)
+	if decision != DecisionAllowed {
+		t.Fatalf("post-TTL decision = %v, want allowed", decision)
+	}
+	if p.mapped.entries[prefix] != entry || entry.generation != generation {
+		t.Fatal("renewal replaced the retained entry generation")
+	}
+	if !entry.expires.After(originalExpiry) || !entry.expires.Equal(clock.Now().Add(time.Minute)) {
+		t.Fatalf("renewed expiry = %v, original = %v", entry.expires, originalExpiry)
+	}
+	if entry.bucket.tokens != tokens-1 {
+		t.Fatalf("bucket tokens = %v, want %v", entry.bucket.tokens, tokens-1)
+	}
+	if entry.active != 2 || p.Active() != 2 {
+		t.Fatalf("entry active = %d, public active = %d", entry.active, p.Active())
+	}
+	second.Release()
+	first.Release()
+	if entry.active != 0 || p.Active() != 0 {
+		t.Fatalf("released entry active = %d, public active = %d", entry.active, p.Active())
+	}
+}
+
+func TestPublicMappedPrefixAllowsThirtyTwoActive(t *testing.T) {
+	clock := newTestClock(time.Unix(0, 0))
+	p := NewPublic(clock)
+	prefix := netip.MustParsePrefix("198.51.100.32/32")
+	leases := make([]PublicLease, 0, 32)
+	for i := range 32 {
+		if i >= p.limits.MappedPrefixBurst {
+			clock.Advance(time.Second)
+		}
+		lease, decision := p.Acquire(prefix)
+		if !decision.Allowed() {
+			t.Fatalf("acquire %d = %v, want allowed", i+1, decision)
+		}
+		leases = append(leases, lease)
+	}
+	clock.Advance(time.Second)
+	if _, decision := p.Acquire(prefix); decision != DecisionThrottled {
+		t.Fatalf("acquire 33 = %v, want throttled", decision)
+	}
+	for i := range leases {
+		leases[i].Release()
+	}
+	if got := p.Active(); got != 0 {
+		t.Fatalf("active after release = %d, want 0", got)
+	}
+}
+
 type testClock struct{ now time.Time }
 
 func newTestClock(now time.Time) *testClock                { return &testClock{now: now} }

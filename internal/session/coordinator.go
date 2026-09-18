@@ -257,11 +257,9 @@ func (c *Coordinator) Transfer(h Handoff) (Reservation, contract.ConnectResult) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.draining {
-		x.releaseLocked()
 		return nil, connect("draining")
 	}
 	if x.attempt != nil && !c.handleStillActiveLocked(x.attempt.handle) {
-		x.releaseLocked()
 		return nil, connect("credential_changed")
 	}
 	if x.attempt == nil || !x.attached || x.released || x.transferred {
@@ -299,11 +297,9 @@ func (c *Coordinator) Commit(v Reservation, origin net.Conn) (Tunnel, contract.C
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.draining {
-		r.releaseLocked(connect("draining"))
 		return nil, connect("draining")
 	}
 	if r.released || r.handoff == nil || r.handoff.released || !c.handleStillActiveLocked(r.handle) {
-		r.releaseLocked(connect("credential_changed"))
 		return nil, connect("credential_changed")
 	}
 	t := &tunnel{coordinator: c, handoff: r.handoff, origin: origin}

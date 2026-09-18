@@ -55,7 +55,7 @@ func V1() Limits {
 		LogQueueSlots: 256, LogRecordBytes: 2048, JournalBytes: 256,
 		JournalSlotBytes: 128, JournalSlots: 2, CheckpointSlots: 2,
 		PreAuthActive: 128, PreAuthRatePerSecond: 20, PreAuthBurst: 40,
-		MappedPrefixActive: 16, MappedPrefixRatePerSecond: 5, MappedPrefixBurst: 10,
+		MappedPrefixActive: 32, MappedPrefixRatePerSecond: 5, MappedPrefixBurst: 10,
 		OverflowActive: 16, OverflowRatePerSecond: 5, OverflowBurst: 10,
 		InvalidAuthRatePerMinute: 5, InvalidAuthBurst: 10, InvalidAuthEntries: 4096,
 		PACPrefixRatePerMinute: 30, PACPrefixBurst: 10, PACGlobalRatePerMinute: 120,

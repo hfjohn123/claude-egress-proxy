@@ -48,7 +48,7 @@ func TestFixedV1Limits(t *testing.T) {
 		{"pre-auth active", int64(got.PreAuthActive), 128},
 		{"pre-auth rate per second", int64(got.PreAuthRatePerSecond), 20},
 		{"pre-auth burst", int64(got.PreAuthBurst), 40},
-		{"mapped prefix active", int64(got.MappedPrefixActive), 16},
+		{"mapped prefix active", int64(got.MappedPrefixActive), 32},
 		{"mapped prefix rate per second", int64(got.MappedPrefixRatePerSecond), 5},
 		{"mapped prefix burst", int64(got.MappedPrefixBurst), 10},
 		{"overflow active", int64(got.OverflowActive), 16},

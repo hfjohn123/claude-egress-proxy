@@ -61,7 +61,8 @@ func (p *Public) Acquire(prefix Prefix) (PublicLease, Decision) {
 		return newBucket(p.clock, float64(p.limits.MappedPrefixRatePerSecond), p.limits.MappedPrefixBurst)
 	})
 	if state == entryExpired {
-		return PublicLease{}, DecisionThrottled
+		entry.expires = now.Add(p.limits.LimiterEntryTTL)
+		state = entryExisting
 	}
 	if state == entryFull {
 		if p.overflowActive == p.limits.OverflowActive {
