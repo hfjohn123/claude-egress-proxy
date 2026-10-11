@@ -45,7 +45,7 @@ jobs:
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o out/release/claude-egress-proxy-linux-amd64 ./cmd/claude-egress-proxy
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o out/release/claude-egress-proxy-linux-arm64 ./cmd/claude-egress-proxy
           sha256sum out/release/* > out/release/SHA256SUMS
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with: { name: release-binaries, path: out/release, retention-days: 14 }
 
   build-linux-amd64:
@@ -53,9 +53,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { fetch-depth: 0 }
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
       - run: docker buildx build --platform linux/amd64 --sbom=true --provenance=mode=max --output type=oci,dest=out/linux-amd64.tar -f deploy/docker/Dockerfile .
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with: { name: image-amd64, path: out/linux-amd64.tar, retention-days: 14 }
 
   build-linux-arm64:
@@ -63,9 +63,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { fetch-depth: 0 }
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
       - run: docker buildx build --platform linux/arm64 --sbom=true --provenance=mode=max --output type=oci,dest=out/linux-arm64.tar -f deploy/docker/Dockerfile .
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with: { name: image-arm64, path: out/linux-arm64.tar, retention-days: 14 }
 
   scan-linux-amd64:
@@ -74,11 +74,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { fetch-depth: 0 }
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: image-amd64, path: out }
       - shell: pwsh
         run: pwsh -NoProfile -File scripts/verify-release.ps1 -Archive out/linux-amd64.tar -ReportDirectory out/scan-amd64 -Platform linux/amd64
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with: { name: scan-amd64, path: out/scan-amd64, retention-days: 14 }
 
   scan-linux-arm64:
@@ -87,11 +87,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { fetch-depth: 0 }
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: image-arm64, path: out }
       - shell: pwsh
         run: pwsh -NoProfile -File scripts/verify-release.ps1 -Archive out/linux-arm64.tar -ReportDirectory out/scan-arm64 -Platform linux/arm64
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with: { name: scan-arm64, path: out/scan-arm64, retention-days: 14 }
 
   publish:
@@ -108,10 +108,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { fetch-depth: 0 }
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: image-amd64, path: out/oci/amd64 }
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: image-arm64, path: out/oci/arm64 }
       - name: publish scanned OCI manifests
         shell: bash
@@ -135,15 +135,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { fetch-depth: 0 }
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: release-binaries, path: out/release }
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: image-amd64, path: out/oci/amd64 }
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: image-arm64, path: out/oci/arm64 }
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: scan-amd64, path: out/scan/amd64 }
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: scan-arm64, path: out/scan/arm64 }
       - name: namespace scan release assets
         shell: pwsh
@@ -186,7 +186,7 @@ jobs:
       - name: retain provenance bundle
         shell: bash
         run: cp "${{ steps.binary-provenance.outputs.bundle-path }}" out/release/provenance.intoto.jsonl
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with: { name: release-evidence, path: out, retention-days: 14 }
 
   draft-release:
@@ -195,9 +195,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: release-evidence, path: out }
-      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
           draft: true
           generate_release_notes: true
