@@ -55,7 +55,7 @@ jobs:
           pwsh -NoProfile -File scripts/verify-generated.ps1
           pwsh -NoProfile -File scripts/verify-public-data.ps1
           go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: test-${{ matrix.os }}
           path: out
@@ -75,7 +75,7 @@ jobs:
       - name: Run native black-box E2E
         shell: bash
         run: sudo --preserve-env=PATH bash scripts/verify-e2e.sh
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: failure()
         with:
           name: e2e-failure
@@ -98,7 +98,7 @@ jobs:
         run: mkdir -p out && docker buildx build --load --tag claude-egress-proxy:ci -f deploy/docker/Dockerfile . && docker save --output out/ci-image.tar claude-egress-proxy:ci
       - shell: pwsh
         run: pwsh -NoProfile -File scripts/verify-container.ps1 -Archive out/ci-image.tar -ReportDirectory out/container-scan -SourceCommit '${{ github.sha }}' -Platform linux/amd64
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: container-scan
           path: out/container-scan
